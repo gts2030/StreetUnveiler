@@ -443,7 +443,7 @@ def prepare_gaussians_and_scene(
         )
 
         (model_params, first_iter) = torch.load(
-            os.path.join(last_inpaint_checkpoint, "splatting.pt")
+            os.path.join(last_inpaint_checkpoint, "splatting.pt"), weights_only=False
         )
         gaussians.restore(model_params, ReOptimizationParams(None))
     else:
@@ -456,7 +456,7 @@ def prepare_gaussians_and_scene(
         )
 
         (model_params, first_iter) = torch.load(
-            os.path.join(dataset.model_path, "checkpoint", "iteration_{}".format(loaded_iter), "splatting.pt")
+            os.path.join(dataset.model_path, "checkpoint", "iteration_{}".format(loaded_iter), "splatting.pt"), weights_only=False
         )
         gaussians.restore(model_params, ReOptimizationParams(None))
 
@@ -517,11 +517,11 @@ if __name__ == "__main__":
     else:
         editable_pcd_mask_path = os.path.join(params_dict['instance_workspace_path'], "editable_pcd_mask.pt")
 
-    editable_pcd_mask = torch.load(editable_pcd_mask_path).cuda()
+    editable_pcd_mask = torch.load(editable_pcd_mask_path, weights_only=False).cuda()
 
     # removed_pcd_mask refers to the removed gaussian points
     removed_pcd_mask_path = os.path.join(params_dict['instance_workspace_path'], "removed_pcd_mask.pt")
-    removed_pcd_mask = torch.load(removed_pcd_mask_path).cuda()
+    removed_pcd_mask = torch.load(removed_pcd_mask_path, weights_only=False).cuda()
 
     # trainable gaussian point mask for MaskGaussianModel
     if args.trainable_pcd_mask_path:
@@ -529,7 +529,7 @@ if __name__ == "__main__":
     else:
         trainable_pcd_mask_path = os.path.join(params_dict['instance_workspace_path'], "trainable_pcd_mask.pt")
 
-    trainable_pcd_mask = torch.load(trainable_pcd_mask_path).cuda()
+    trainable_pcd_mask = torch.load(trainable_pcd_mask_path, weights_only=False).cuda()
 
     mask_gaussians = prepare_mask_gaussians(
         model.extract(args),

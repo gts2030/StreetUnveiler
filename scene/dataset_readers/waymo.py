@@ -19,7 +19,7 @@ import torch
 import numpy as np
 
 from utils.pcd_utils import SemanticPointCloud
-from utils.semantic_utils import cityscapes2concerned, concerned_classes_list, concerned_classes_ind_map, WAYMO_CAMERAS, WAYMO_LIDARS
+from utils.semantic_utils import cityscapes2concerned, concerned_classes_list, concerned_classes_ind_map #, WAYMO_CAMERAS, WAYMO_LIDARS
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
 from scene.dataset_readers.basic_utils import CameraInfo, SceneInfo, getNerfppNorm, storePly, fetchPly, storeSemanticPly
@@ -371,13 +371,13 @@ def readWaymoInfo(
         scenario = pickle.load(f)
 
     try:
-        cameras_extrinsic_file = os.path.join(colmap_path, "sparse/0", "images.bin")
-        cameras_intrinsic_file = os.path.join(colmap_path, "sparse/0", "cameras.bin")
+        cameras_extrinsic_file = os.path.join(colmap_path, "sparse/", "images.bin")
+        cameras_intrinsic_file = os.path.join(colmap_path, "sparse/", "cameras.bin")
         cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
         cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
     except:
-        cameras_extrinsic_file = os.path.join(colmap_path, "sparse/0", "images.txt")
-        cameras_intrinsic_file = os.path.join(colmap_path, "sparse/0", "cameras.txt")
+        cameras_extrinsic_file = os.path.join(colmap_path, "sparse/", "images.txt")
+        cameras_intrinsic_file = os.path.join(colmap_path, "sparse/", "cameras.txt")
         cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
         cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
@@ -414,7 +414,7 @@ def readWaymoInfo(
     if eval:
         waymo_translation_list_with_eval_cam = [c for idx, c in enumerate(waymo_translation_list) if idx % llffhold != 0]
         waymo_translation_list = waymo_translation_list_with_eval_cam
-
+    print(len(waymo_translation_list))
     # colmap camera position
     colmap_translation_list = []
     for info in train_cam_infos:
@@ -423,7 +423,7 @@ def readWaymoInfo(
         colmap_w2c[:3, 3] = info.T
         colmap_c2w = np.linalg.inv(colmap_w2c)
         colmap_translation_list.append(colmap_c2w[:3, 3])
-
+    print(len(colmap_translation_list))
     rmsd, R_ij, T_i, c = Superpose3D(np.array(colmap_translation_list), np.array(waymo_translation_list), None, True, False)
 
     waymo2colmap = np.eye(4)

@@ -1,4 +1,3 @@
-
 #
 # Copyright (C) 2025, Jingwei Xu
 # All rights reserved.
@@ -199,7 +198,7 @@ if __name__ == '__main__':
     else:
         mask_path = os.path.join(current_inpaint_workspace, "removed_pcd_mask.pt")
 
-    removed_pcd_mask = torch.load(mask_path).cuda()
+    removed_pcd_mask = torch.load(mask_path, weights_only=False).cuda()
 
     removed_pcd_mask = include_neighbor_pcd(
         model.extract(args),

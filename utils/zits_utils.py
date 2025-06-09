@@ -189,11 +189,11 @@ class ZitsGuidance():
 
         if self.args.ckpt_resume:
             print("Loading checkpoint: {} ...".format(self.args.ckpt_resume))
-            checkpoint = torch.load(self.args.ckpt_resume, map_location='cpu')
+            checkpoint = torch.load(self.args.ckpt_resume, map_location='cpu', weights_only=False)
             torch_init_model(self.model, checkpoint, key='state_dict')
 
         if hasattr(self.model, "wf"):
-            self.model.wf.load_state_dict(torch.load(self.args.wf_ckpt, map_location='cpu')['model'])
+            self.model.wf.load_state_dict(torch.load(self.args.wf_ckpt, map_location='cpu', weights_only=False)['model'])
 
         self.model.cuda()
 
