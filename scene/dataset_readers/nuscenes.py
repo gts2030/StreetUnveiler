@@ -57,7 +57,7 @@ def mapNuScenesPcdToImage(
         camera_token: str,
         pointsensor,
         min_dist: float = 1.0,
-) -> Tuple:
+) -> tuple:
 
     cam = nusc.explorer.nusc.get('sample_data', camera_token)
 

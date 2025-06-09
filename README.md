@@ -67,14 +67,14 @@ conda create -n streetunveiler python=3.10
 conda activate streetunveiler
 
 # Suppose CUDA version is 12.1, please change your code properly according to your CUDA version.
-conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 pip install -r requirements.txt
 
 git submodule update --init --recursive
 pip install submodules/superpose3d
 pip install submodules/sh_encoder
-pip install submodules/simple-knn
+pip install git+https://github.com/camenduru/simple-knn
 pip install submodules/diff-surfel-rasterization
 
 cd submodules/tiny-cuda-nn/bindings/torch

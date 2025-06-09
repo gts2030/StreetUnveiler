@@ -108,7 +108,7 @@ if __name__ == '__main__':
     else:
         cluster_path = os.path.join(current_inpaint_workspace, "cluster_idx.pt")
 
-    (cluster_idx, semantic_mask_bit) = torch.load(cluster_path)
+    (cluster_idx, semantic_mask_bit) = torch.load(cluster_path, weights_only=False)
     cluster_idx = cluster_idx.cuda()
 
     if args.solid_cluster_mask:
@@ -116,7 +116,7 @@ if __name__ == '__main__':
     else:
         solid_cluster_mask = os.path.join(current_inpaint_workspace, "solid_cluster_mask.pt")
 
-    solid_cluster_mask = torch.load(solid_cluster_mask).cuda()
+    solid_cluster_mask = torch.load(solid_cluster_mask, weights_only=False).cuda()
 
     generate_pcd_valid_mask(
         model.extract(args),

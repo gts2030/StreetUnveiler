@@ -299,7 +299,7 @@ def getPandasetSemanticPcd(
         generatePandasetSemanticLidarPcd(panda_scene, colmap_path, downsample_lidar_voxel_size)
 
     lidar_pcd = fetchPly(lidar_ply_path)
-    lidar_semantic = torch.load(ply_semantic_index_path)
+    lidar_semantic = torch.load(ply_semantic_index_path, weights_only=False)
     lidar_pcd.load_semantics(lidar_semantic)
 
     final_ply_path = os.path.join(colmap_path, "final_points3D_{}.ply".format(downsample_lidar_voxel_size))
@@ -328,7 +328,7 @@ def getPandasetSemanticPcd(
         torch.save(final_semantic, final_ply_semantic_index_path)
 
     final_pcd = fetchPly(final_ply_path)
-    final_pcd_semantic = torch.load(final_ply_semantic_index_path)
+    final_pcd_semantic = torch.load(final_ply_semantic_index_path, weights_only=False)
     final_pcd.load_semantics(final_pcd_semantic)
 
     return lidar_pcd, final_pcd, lidar_ply_path, final_ply_path
@@ -349,6 +349,7 @@ def readPandasetInfo(
         return f'{idx_to_frame_str(frame_index)}.{ext}'
 
     panda = pandaDataSet(pandaset_path)
+    print(panda.sequences())
     scene_name = os.path.basename(colmap_path)
     panda_scene = panda[scene_name]
     panda_scene.load_camera()
