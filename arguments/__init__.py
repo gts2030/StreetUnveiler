@@ -87,6 +87,18 @@ class OptimizationParams(ParamGroup):
         self.enable_semantic_loss = True
         self.semantic_loss_ratio = 0.1
 
+        # Feature extractor parameters
+        self.enable_feature_loss = True 
+        self.feature_loss_weight = 0.1
+        self.feature_extractor_model = 'dinov2_reg_small_fine'  # For uncertainty prediction
+        self.depth_estimator_model = 'metric3d_vit_large'  # Depth estimation model
+        
+        # Uncertainty loss parameters
+        self.enable_uncertainty_loss = True  # Set to True to enable uncertainty loss
+        self.uncertainty_lambda1 = 1.0  # Weight for depth uncertainty term
+        self.uncertainty_lambda2 = 0.01  # Weight for variance regularization
+        self.uncertainty_lambda3 = 0.01  # Weight for uncertainty regularization
+
         self.densification_interval = 500
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500

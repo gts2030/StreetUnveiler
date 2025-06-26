@@ -1,4 +1,3 @@
-
 #
 # Edited by: Jingwei Xu, ShanghaiTech University
 # Based on the code from: https://github.com/graphdeco-inria/gaussian-splatting
@@ -23,6 +22,10 @@ from utils.image_utils import psnr
 from utils.semantic_utils import concerned_classes_ind_map, concerned_classes_list, semantic_prob_to_rgb
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from utils.mono_priors.img_feature_extractors import get_feature_extractor, predict_img_features
+from utils.mono_priors.metric_depth_estimators import get_metric_depth_estimator, predict_metric_depth
+from utils.dyn_uncertainty.uncertainty_model import generate_uncertainty_mlp, get_uncertainty_and_loss
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -35,11 +38,44 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     sky_model = SkyModel()
+    uncertainty_mlp = None
+    if hasattr(opt, 'enable_uncertainty_loss') and opt.enable_uncertainty_loss:
+        uncertainty_mlp = generate_uncertainty_mlp(384, upscale_factor=1)  # No upsampling in MLP
+        print("Uncertainty MLP initialized")
     if continue_model_path:
         scene = Scene(dataset, gaussians, sky_model, load_iteration=start_iteration)
     else:
         scene = Scene(dataset, gaussians, sky_model)
     gaussians.training_setup(opt)
+
+    # Initialize depth estimator and feature extractor if needed
+    feature_extractor = None
+    depth_estimator = None
+    if hasattr(opt, 'enable_feature_loss') and opt.enable_feature_loss:
+        # Configuration for both depth estimator and feature extractor
+        feature_cfg = {
+            "device": "cuda",
+            "mono_prior": {
+                "feature_extractor": getattr(opt, 'feature_extractor_model', 'dinov2_reg_small_fine'),
+                "depth": getattr(opt, 'depth_estimator_model', 'metric3d_vit_large')
+            },
+            "data": {
+                "output": dataset.model_path
+            },
+            "scene": getattr(dataset, 'scene_name', 'default_scene'),
+            "cam": {
+                "fx": 1000.0  # Default focal length, should be adjusted based on dataset
+            }
+        }
+        
+        # Initialize depth estimator for depth-based feature loss
+        depth_estimator = get_metric_depth_estimator(feature_cfg)
+        print(f"Depth estimator initialized: {feature_cfg['mono_prior']['depth']}")
+        
+        # Initialize feature extractor only if uncertainty loss is enabled
+        if hasattr(opt, 'enable_uncertainty_loss') and opt.enable_uncertainty_loss:
+            feature_extractor = get_feature_extractor(feature_cfg)
+            print(f"Feature extractor initialized for uncertainty: {feature_cfg['mono_prior']['feature_extractor']}")
 
     # may have some problems
     if continue_model_path:
@@ -59,6 +95,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     gaussians.prune_semantic_splatting(1 << concerned_classes_ind_map['sky'])
+    
+    # Store uncertainty for visualization
+    current_uncertainty = None
+    
     for iteration in range(first_iter, opt.iterations + 1):
 
         iter_start.record()
@@ -106,20 +146,121 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             semantic_loss.backward()
 
+        # Get initial render for both feature loss and uncertainty loss
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
         render_image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
-        # Loss
+        # Depth-based feature loss computation
+        if hasattr(opt, 'enable_feature_loss') and opt.enable_feature_loss and depth_estimator is not None:
+            feature_loss_weight = getattr(opt, 'feature_loss_weight', 0.1)
+            gt_image = viewpoint_cam.original_image.cuda()
+            
+            if gt_image.dim() == 3:
+                gt_image_input = gt_image.unsqueeze(0)  # Add batch dimension
+            else:
+                gt_image_input = gt_image
+            
+            # Predict depth from ground truth image
+            gt_depth = predict_metric_depth(
+                depth_estimator,
+                select_frame_id,
+                gt_image_input,
+                feature_cfg,
+                "cuda",
+                save_depth=True  # Don't save during training
+            )
+            
+            # Get rendered depth
+            rendered_depth = render_pkg.get("surf_depth", None)
+            if rendered_depth is not None:
+                # Ensure both depths have the same shape
+                if rendered_depth.dim() > 2:
+                    rendered_depth = rendered_depth.squeeze()
+                if gt_depth.dim() > 2:
+                    gt_depth = gt_depth.squeeze()
+                
+                # Resize if necessary
+                if rendered_depth.shape != gt_depth.shape:
+                    gt_depth = F.interpolate(
+                        gt_depth.unsqueeze(0).unsqueeze(0), 
+                        size=rendered_depth.shape, 
+                        mode='bilinear', 
+                        align_corners=False
+                    ).squeeze()
+                
+                # Compute depth L1 loss
+                feature_loss = F.l1_loss(rendered_depth, gt_depth) * feature_loss_weight
+                loss_dict['feature_depth'] = feature_loss
+                # Don't call backward here - will be added to main loss instead
+            else:
+                print("Warning: No rendered depth available for depth-based feature loss")
+
+    
+        # Loss (using already rendered image from above)
         gt_image = viewpoint_cam.original_image.cuda()
         sky_image = sky_model.render_with_camera(viewpoint_cam.image_height, viewpoint_cam.image_width, viewpoint_cam.K, viewpoint_cam.c2w)
         composite_image = render_image + sky_image * (1 - render_pkg["rend_alpha"])
         Ll1 = l1_loss(composite_image, gt_image)
-        Lssim = ssim(composite_image, gt_image)
+        Lssim, ssim_map = ssim(composite_image, gt_image)
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - Lssim)
-
         loss_dict['l1'] = Ll1
         loss_dict['ssim'] = Lssim
+
+        # Uncertainty loss computation using the formula: L_uncer = (L_SSIM + λ1 * L_uncer_D) / β_i^2 + λ2 * L_reg_V + λ3 * L_reg_U
+        if uncertainty_mlp is not None and hasattr(opt, 'enable_uncertainty_loss') and opt.enable_uncertainty_loss:
+            # We need features for uncertainty prediction
+            uncertainty_features = None
+            
+            if feature_extractor is not None:
+                # Extract features for uncertainty prediction
+                gt_image = viewpoint_cam.original_image.cuda()
+                if gt_image.dim() == 3:
+                    gt_image_input = gt_image.unsqueeze(0)
+                else:
+                    gt_image_input = gt_image
+                
+                uncertainty_features = predict_img_features(
+                    feature_extractor,
+                    select_frame_id,
+                    gt_image_input,
+                    feature_cfg,
+                    "cuda",
+                    save_feat=False
+                )
+            else:
+                print("Warning: Uncertainty loss requires feature extractor to be enabled")
+                uncertainty_features = None
+                
+            if uncertainty_features is not None:
+                # Get uncertainty loss parameters
+                lambda1 = getattr(opt, 'uncertainty_lambda1', 1.0)
+                lambda2 = getattr(opt, 'uncertainty_lambda2', 0.01)
+                lambda3 = getattr(opt, 'uncertainty_lambda3', 0.01)
+                
+                # Check if depth is available for depth uncertainty term
+                depth_rendered = render_pkg.get("surf_depth", None)
+                depth_gt = getattr(viewpoint_cam, 'depth', None)
+                if depth_gt is not None:
+                    depth_gt = torch.from_numpy(depth_gt).cuda().float()
+                
+                uncertainty, uncertainty_loss = get_uncertainty_and_loss(
+                    uncertainty_features,
+                    uncertainty_mlp,
+                    Ll1,  # Use computed L1 loss
+                    ssim_map,
+                    depth_rendered,
+                    depth_gt,
+                    lambda1,
+                    lambda2,
+                    lambda3
+                )
+                
+                # Store uncertainty for visualization
+                current_uncertainty = uncertainty.detach()
+                
+                loss_dict['uncertainty'] = uncertainty_loss
+                loss += uncertainty_loss
 
         lambda_normal = opt.lambda_normal if iteration > opt.normal_consist_from_iter else 0.0
         rend_dist = render_pkg["rend_dist"]
@@ -157,7 +298,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model)
+            training_report(tb_writer, iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model, current_uncertainty)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -233,7 +374,7 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, loss_dict, loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, sky_model):
+def training_report(tb_writer, iteration, loss_dict, loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, sky_model, current_uncertainty=None):
     if tb_writer:
         for key, value in loss_dict.items():
             tb_writer.add_scalar('train_loss_patches/{}_loss'.format(key), value.item(), iteration)
@@ -281,6 +422,23 @@ def training_report(tb_writer, iteration, loss_dict, loss, elapsed, testing_iter
                         semantic_pkg = render_semantic(viewpoint, scene.gaussians, *renderArgs)
                         tb_writer.add_images(config['name'] + "_view_{}/rend_semantic".format(viewpoint.image_name),
                                              semantic_pkg['semantic_rgb'][None], global_step=iteration)
+                        
+                        # Add uncertainty heat map visualization
+                        if current_uncertainty is not None:
+                            # Resize uncertainty to match image dimensions if needed
+                            uncertainty_vis = current_uncertainty
+                            if uncertainty_vis.shape != (viewpoint.image_height, viewpoint.image_width):
+                                uncertainty_vis = F.interpolate(
+                                    uncertainty_vis.unsqueeze(0).unsqueeze(0),
+                                    size=(viewpoint.image_height, viewpoint.image_width),
+                                    mode='bilinear',
+                                    align_corners=False
+                                ).squeeze()
+                            
+                            # Convert to heat map using colormap
+                            uncertainty_heatmap = colormap(uncertainty_vis.cpu().numpy(), cmap='jet')
+                            tb_writer.add_images(config['name'] + "_view_{}/uncertainty_heatmap".format(viewpoint.image_name),
+                                                 uncertainty_heatmap[None], global_step=iteration)
 
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
