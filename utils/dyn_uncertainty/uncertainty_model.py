@@ -40,6 +40,7 @@ class MLPNetwork(nn.Module):
         )
         
         self.net_activation = net_activation
+        self.optimizer = None  # Will be initialized when setup_training is called
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Input processing
@@ -80,15 +81,80 @@ class MLPNetwork(nn.Module):
         
         return x
 
-def generate_uncertainty_mlp(n_features: int, upscale_factor: int = 1) -> MLPNetwork:
+    def setup_training(self, lr: float = 0.0001, optimizer_type: str = 'adam'):
+        """Initialize optimizer for uncertainty MLP training"""
+        if optimizer_type.lower() == 'adam':
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        elif optimizer_type.lower() == 'sgd':
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=lr)
+        else:
+            raise ValueError(f"Unknown optimizer type: {optimizer_type}")
+        print(f"Uncertainty MLP optimizer ({optimizer_type}) initialized with lr={lr}")
+
+    def step_optimizer(self):
+        """Step the optimizer and zero gradients"""
+        if self.optimizer is not None:
+            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+        else:
+            print("Warning: Optimizer not initialized. Call setup_training() first.")
+
+    def save_checkpoint(self, checkpoint_path: str, iteration: int):
+        """Save uncertainty MLP checkpoint"""
+        import os
+        os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+        
+        checkpoint_data = {
+            'model_state_dict': self.state_dict(),
+            'iteration': iteration
+        }
+        
+        # Add optimizer state if available
+        if self.optimizer is not None:
+            checkpoint_data['optimizer_state_dict'] = self.optimizer.state_dict()
+        
+        torch.save(checkpoint_data, checkpoint_path)
+        print(f"Uncertainty MLP checkpoint saved: {checkpoint_path}")
+
+    def load_checkpoint(self, checkpoint_path: str, setup_optimizer: bool = True, lr: float = 0.0001):
+        """Load uncertainty MLP checkpoint"""
+        import os
+        if not os.path.exists(checkpoint_path):
+            print(f"Warning: Uncertainty MLP checkpoint not found at {checkpoint_path}")
+            return False
+        
+        checkpoint_data = torch.load(checkpoint_path, weights_only=False)
+        
+        # Load model state
+        self.load_state_dict(checkpoint_data['model_state_dict'])
+        
+        # Setup and load optimizer if requested
+        if setup_optimizer:
+            if self.optimizer is None:
+                self.setup_training(lr=lr)
+            
+            if 'optimizer_state_dict' in checkpoint_data:
+                self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+        
+        iteration = checkpoint_data.get('iteration', -1)
+        print(f"Uncertainty MLP checkpoint loaded: {checkpoint_path} (iteration {iteration})")
+        return True
+
+def generate_uncertainty_mlp(n_features: int, upscale_factor: int = 1, lr: float = 0.0001, setup_training: bool = True) -> MLPNetwork:
     """
     Create uncertainty MLP that outputs at rendered image resolution.
     
     Args:
         n_features: Number of input features
         upscale_factor: Upsampling factor (1 means no upsampling, use interpolation instead)
+        lr: Learning rate for optimizer
+        setup_training: Whether to initialize optimizer
     """
     network = MLPNetwork(input_dim=n_features, upscale_factor=upscale_factor).cuda()
+    
+    if setup_training:
+        network.setup_training(lr=lr)
+    
     return network
 
 def compute_uncertainty_weighted_loss(

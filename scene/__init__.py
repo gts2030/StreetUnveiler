@@ -15,6 +15,7 @@ from scene.gaussian_model import GaussianModel
 from scene.env_map import SkyModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from utils.dyn_uncertainty.uncertainty_model import generate_uncertainty_mlp
 from utils.graphics_utils import fov2focal, getProjectionMatrix
 from utils.semantic_utils import concerned_classes_ind_map
 
@@ -22,10 +23,11 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args: ModelParams, gaussians: GaussianModel, sky_model: SkyModel=None, load_iteration=None, shuffle=False, resolution_scales=[1.0], only_pose=False, splatting_ply_path=None):
+    def __init__(self, args: ModelParams, gaussians: GaussianModel, sky_model: SkyModel=None, uncertainty_mlp=None, load_iteration=None, shuffle=False, resolution_scales=[1.0], only_pose=False, splatting_ply_path=None):
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
+        self.uncertainty_mlp = uncertainty_mlp
 
         if load_iteration:
             if load_iteration == -1:
@@ -113,6 +115,9 @@ class Scene:
                                                  "point_cloud.ply") if splatting_ply_path is None else splatting_ply_path)
             if sky_model is not None:
                 sky_model.load(os.path.join(self.model_path, "checkpoint", "iteration_" + str(self.loaded_iter), "sky_params.pt"))
+            
+            if self.uncertainty_mlp is not None:
+                self.uncertainty_mlp.load_checkpoint(os.path.join(self.model_path, "checkpoint", "iteration_" + str(self.loaded_iter), "uncertainty_mlp.pt"))
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
@@ -180,6 +185,17 @@ class Scene:
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_semantic_ply(os.path.join(point_cloud_path, "semantic_point_cloud.ply"))
         self.gaussians.save_opacity_ply(os.path.join(point_cloud_path, "opacity_point_cloud.ply"))
+
+    def save_checkpoint(self, iteration):
+        """Save checkpoint including uncertainty MLP if available"""
+        if self.uncertainty_mlp is not None:
+            checkpoint_path = os.path.join(self.model_path, "checkpoint", "iteration_{}".format(iteration), "uncertainty_mlp.pt")
+            self.uncertainty_mlp.save_checkpoint(checkpoint_path, iteration)
+
+    def step_uncertainty_optimizer(self):
+        """Step uncertainty optimizer if available"""
+        if self.uncertainty_mlp is not None:
+            self.uncertainty_mlp.step_optimizer()
 
     def save_at_inpaint(self, loaded_iter, iteration):
         point_cloud_path = os.path.join(self.model_path, "inpaint_{}".format(loaded_iter), "point_cloud/iteration_{}".format(iteration))

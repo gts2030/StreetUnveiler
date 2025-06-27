@@ -5,4 +5,5 @@ CUDA_VISIBLE_DEVICES=$2 python3 inpainting_pipeline/1_selection/1_instance_visua
 
 CUDA_VISIBLE_DEVICES=$2 python3 inpainting_pipeline/2_condition_preparation/1_select_instance.py -m $1 --all
 
+# Generate inpainted masks and uncertainty maps together for efficiency
 CUDA_VISIBLE_DEVICES=$2 python3 inpainting_pipeline/2_condition_preparation/2_generate_inpainted_mask.py -m $1

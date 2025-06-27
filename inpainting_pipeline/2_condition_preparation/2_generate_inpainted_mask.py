@@ -90,6 +90,29 @@ def include_neighbor_pcd(
     return pcd_mask
 
 
+def copy_uncertainty_maps(model_path, current_inpaint_workspace):
+    """Copy uncertainty maps from training output to instance workspace"""
+    import shutil
+    
+    uncertainty_source = os.path.join(model_path, "uncertainty_maps")
+    uncertainty_dest = os.path.join(current_inpaint_workspace, "uncertainty_map")
+    
+    if os.path.exists(uncertainty_source):
+        makedirs(uncertainty_dest, exist_ok=True)
+        
+        # Copy all uncertainty files
+        for filename in os.listdir(uncertainty_source):
+            if filename.endswith(('_uncertainty.png')):
+                src_path = os.path.join(uncertainty_source, filename)
+                dest_path = os.path.join(uncertainty_dest, filename)
+                shutil.copy2(src_path, dest_path)
+        
+        print(f"Copied uncertainty maps from {uncertainty_source} to {uncertainty_dest}")
+        return True
+    else:
+        print(f"No uncertainty maps found at {uncertainty_source}")
+        return False
+
 def render_set(model_path, views, gaussians, pipeline, background, removed_pcd_mask, current_inpaint_workspace, sky_model):
     mask_path = os.path.join(current_inpaint_workspace, "mask_inpaint")
     inpainted_depth_path = os.path.join(current_inpaint_workspace, "inpainted_depth")
@@ -104,6 +127,9 @@ def render_set(model_path, views, gaussians, pipeline, background, removed_pcd_m
     makedirs(inpainted_normal_path, exist_ok=True)
     makedirs(original_rgb_path, exist_ok=True)
     makedirs(empty_opacity_path, exist_ok=True)
+    
+    # Copy uncertainty maps if available
+    copy_uncertainty_maps(model_path, current_inpaint_workspace)
 
     valid_frame_list = []
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):

@@ -95,9 +95,15 @@ class OptimizationParams(ParamGroup):
         
         # Uncertainty loss parameters
         self.enable_uncertainty_loss = True  # Set to True to enable uncertainty loss
+        self.uncertainty_lr = 0.0001  # Learning rate for uncertainty MLP
         self.uncertainty_lambda1 = 1.0  # Weight for depth uncertainty term
         self.uncertainty_lambda2 = 0.01  # Weight for variance regularization
         self.uncertainty_lambda3 = 0.01  # Weight for uncertainty regularization
+        
+        # Render loss parameters (L_render from paper)
+        self.render_lambda5 = 1.0  # Color loss weight in render loss
+        self.render_lambda6 = 1.0  # Depth loss weight in render loss  
+        self.render_lambda7 = 0.01  # Isotropic regularization weight in render loss
 
         self.densification_interval = 500
         self.opacity_reset_interval = 3000

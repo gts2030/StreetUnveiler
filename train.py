@@ -25,6 +25,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.mono_priors.img_feature_extractors import get_feature_extractor, predict_img_features
 from utils.mono_priors.metric_depth_estimators import get_metric_depth_estimator, predict_metric_depth
 from utils.dyn_uncertainty.uncertainty_model import generate_uncertainty_mlp, get_uncertainty_and_loss
+import cv2
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -38,14 +39,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     sky_model = SkyModel()
+    
+    # Initialize uncertainty MLP if enabled
     uncertainty_mlp = None
     if hasattr(opt, 'enable_uncertainty_loss') and opt.enable_uncertainty_loss:
-        uncertainty_mlp = generate_uncertainty_mlp(384, upscale_factor=1)  # No upsampling in MLP
+        uncertainty_lr = getattr(opt, 'uncertainty_lr', 0.0001)
+        uncertainty_mlp = generate_uncertainty_mlp(384, upscale_factor=1, lr=uncertainty_lr, setup_training=True)
         print("Uncertainty MLP initialized")
+    
     if continue_model_path:
-        scene = Scene(dataset, gaussians, sky_model, load_iteration=start_iteration)
+        scene = Scene(dataset, gaussians, sky_model, uncertainty_mlp, load_iteration=start_iteration)
     else:
-        scene = Scene(dataset, gaussians, sky_model)
+        scene = Scene(dataset, gaussians, sky_model, uncertainty_mlp)
     gaussians.training_setup(opt)
 
     # Initialize depth estimator and feature extractor if needed
@@ -203,12 +208,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(composite_image, gt_image)
         Lssim, ssim_map = ssim(composite_image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - Lssim)
-        loss_dict['l1'] = Ll1
-        loss_dict['ssim'] = Lssim
-
+        # Initialize current_uncertainty for render loss computation
+        current_uncertainty = None
+        
         # Uncertainty loss computation using the formula: L_uncer = (L_SSIM + λ1 * L_uncer_D) / β_i^2 + λ2 * L_reg_V + λ3 * L_reg_U
-        if uncertainty_mlp is not None and hasattr(opt, 'enable_uncertainty_loss') and opt.enable_uncertainty_loss:
+        if scene.uncertainty_mlp is not None and hasattr(opt, 'enable_uncertainty_loss') and opt.enable_uncertainty_loss:
             # We need features for uncertainty prediction
             uncertainty_features = None
             
@@ -244,23 +248,94 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if depth_gt is not None:
                     depth_gt = torch.from_numpy(depth_gt).cuda().float()
                 
+                # Use detached losses for uncertainty prediction (no gradient to Gaussians)
+                uncertainty_Ll1 = Ll1.detach()
+                uncertainty_ssim_map = ssim_map.detach()
+                uncertainty_depth_rendered = depth_rendered.detach() if depth_rendered is not None else None
+                
                 uncertainty, uncertainty_loss = get_uncertainty_and_loss(
                     uncertainty_features,
-                    uncertainty_mlp,
-                    Ll1,  # Use computed L1 loss
-                    ssim_map,
-                    depth_rendered,
+                    scene.uncertainty_mlp,
+                    uncertainty_Ll1,  # Detached L1 loss
+                    uncertainty_ssim_map,  # Detached SSIM map
+                    uncertainty_depth_rendered,  # Detached depth
                     depth_gt,
                     lambda1,
                     lambda2,
                     lambda3
                 )
                 
-                # Store uncertainty for visualization
+                # Store uncertainty for visualization and render loss computation
                 current_uncertainty = uncertainty.detach()
                 
+                # Train uncertainty MLP independently (as per paper)
                 loss_dict['uncertainty'] = uncertainty_loss
-                loss += uncertainty_loss
+                uncertainty_loss.backward()  # Uncertainty MLP만 업데이트
+
+        # Compute render loss with uncertainty weighting if available
+        # L_render = (λ5*L_color + λ6*L_depth) / β^2 + λ7*L_iso
+        if current_uncertainty is not None:
+            # Get render loss parameters
+            lambda5 = getattr(opt, 'render_lambda5', 1.0)  # Color loss weight
+            lambda6 = getattr(opt, 'render_lambda6', 1.0)  # Depth loss weight  
+            lambda7 = getattr(opt, 'render_lambda7', 0.01)  # Isotropic regularization weight
+            
+            # Resize uncertainty to match image dimensions if needed
+            uncertainty_map = current_uncertainty.detach()  # DETACH to prevent gradient flow to uncertainty MLP
+            if uncertainty_map.dim() == 2:
+                uncertainty_map = uncertainty_map.unsqueeze(0)
+            if uncertainty_map.shape[-2:] != gt_image.shape[-2:]:
+                uncertainty_map = F.interpolate(
+                    uncertainty_map.unsqueeze(0),
+                    size=gt_image.shape[-2:],
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0).squeeze(0)
+            else:
+                uncertainty_map = uncertainty_map.squeeze()
+            
+            # Recompute color loss for render loss (independent computational graph)
+            render_Ll1 = l1_loss(composite_image, gt_image)
+            render_Lssim, _ = ssim(composite_image, gt_image)
+            L_color = (1.0 - opt.lambda_dssim) * render_Ll1 + opt.lambda_dssim * (1.0 - render_Lssim)
+            
+            # Compute L_depth if depth is available
+            L_depth = torch.tensor(0.0, device=gt_image.device)
+            depth_rendered = render_pkg.get("surf_depth", None)
+            if depth_rendered is not None and hasattr(viewpoint_cam, 'depth') and viewpoint_cam.depth is not None:
+                depth_gt = torch.from_numpy(viewpoint_cam.depth).cuda().float()
+                if depth_rendered.shape != depth_gt.shape:
+                    depth_gt = F.interpolate(
+                        depth_gt.unsqueeze(0).unsqueeze(0),
+                        size=depth_rendered.shape,
+                        mode='bilinear',
+                        align_corners=False
+                    ).squeeze()
+                L_depth = F.l1_loss(depth_rendered, depth_gt)
+            
+            # Compute β^2 (uncertainty squared) with small epsilon to avoid division by zero
+            beta_squared = uncertainty_map.pow(2) + 1e-8
+            
+            # Compute render loss: L_render = (λ5*L_color + λ6*L_depth) / β^2 + λ7*L_iso (Eq. 6)
+            uncertainty_weighted_loss = (lambda5 * L_color + lambda6 * L_depth) / beta_squared.mean()
+            
+            # Add isotropic regularization loss L_iso
+            L_iso = uncertainty_map.mean()
+            loss = uncertainty_weighted_loss + lambda7 * L_iso
+            
+            # Log individual components
+            loss_dict['render_loss'] = loss
+            loss_dict['L_color'] = L_color
+            loss_dict['L_depth'] = L_depth
+            loss_dict['L_iso'] = L_iso
+            loss_dict['beta_mean'] = uncertainty_map.mean()
+        else:
+            # Fallback to basic loss without uncertainty weighting
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - Lssim)
+        
+        # Log basic components
+        loss_dict['l1'] = Ll1
+        loss_dict['ssim'] = Lssim
 
         lambda_normal = opt.lambda_normal if iteration > opt.normal_consist_from_iter else 0.0
         rend_dist = render_pkg["rend_dist"]
@@ -284,7 +359,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss += shrink_loss
         loss_dict['Lshrink'] = shrink_loss
 
-        loss.backward()
+        loss.backward()  # Gaussian만 업데이트
 
         iter_end.record()
 
@@ -339,6 +414,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.optimizer.zero_grad(set_to_none = True)
                 sky_model.optimizer.step()
                 sky_model.optimizer.zero_grad()
+                
+                # Update uncertainty MLP if enabled
+                scene.step_uncertainty_optimizer()
 
             if (iteration in checkpoint_iterations):
                 checkpoint_path = os.path.join(scene.model_path, "checkpoint", "iteration_{}".format(iteration))
@@ -346,6 +424,74 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), os.path.join(checkpoint_path, "splatting.pt"))
                 sky_model.save(os.path.join(checkpoint_path, "sky_params.pt"))
+                
+                # Save uncertainty MLP checkpoint using Scene method
+                scene.save_checkpoint(iteration)
+
+    # Generate uncertainty maps for all input images at the end of training
+    if scene.uncertainty_mlp is not None and feature_extractor is not None:
+        print("\nGenerating uncertainty maps for all input images...")
+        uncertainty_output_dir = os.path.join(scene.model_path, "uncertainty_maps")
+        os.makedirs(uncertainty_output_dir, exist_ok=True)
+        
+        # Process all training cameras
+        with torch.no_grad():
+            scene.uncertainty_mlp.eval()
+            for idx, viewpoint_cam in enumerate(tqdm(scene.getTrainCameras(), desc="Generating uncertainty maps")):
+                try:
+                    # Use ground truth image for uncertainty prediction
+                    gt_image = viewpoint_cam.original_image.cuda()
+                    if gt_image.dim() == 3:
+                        gt_image_input = gt_image.unsqueeze(0)
+                    else:
+                        gt_image_input = gt_image
+                    
+                    # Extract features (same as training)
+                    uncertainty_features = predict_img_features(
+                        feature_extractor,
+                        idx,
+                        gt_image_input,
+                        feature_cfg,
+                        "cuda",
+                        save_feat=False
+                    )
+                    
+                    if uncertainty_features is not None:
+                        # Predict uncertainty
+                        uncertainty = scene.uncertainty_mlp(uncertainty_features)
+                        
+                        # Resize to match image dimensions if needed
+                        target_size = gt_image.shape[-2:]
+                        if uncertainty.shape != target_size:
+                            uncertainty = F.interpolate(
+                                uncertainty.unsqueeze(0).unsqueeze(0) if uncertainty.dim() == 2 else uncertainty.unsqueeze(0),
+                                size=target_size,
+                                mode='bilinear',
+                                align_corners=False
+                            ).squeeze()
+                        
+                        # Save both raw data and visualization
+                        frame_name = f"{idx:05d}"
+                        if hasattr(viewpoint_cam, 'image_name'):
+                            frame_name = viewpoint_cam.image_name
+                        
+                        # Save raw uncertainty (.npy)
+                        uncertainty_np = uncertainty.detach().cpu().numpy()
+                        np.save(os.path.join(uncertainty_output_dir, f"{frame_name}_uncertainty.npy"), uncertainty_np)
+                        
+                        # Save visualization (.png)
+                        uncertainty_norm = (uncertainty_np - uncertainty_np.min()) / (uncertainty_np.max() - uncertainty_np.min() + 1e-8)
+                        uncertainty_vis = (uncertainty_norm * 255).astype(np.uint8)
+                        
+                        # Apply jet colormap
+                        import cv2
+                        uncertainty_colored = cv2.applyColorMap(uncertainty_vis, cv2.COLORMAP_JET)
+                        cv2.imwrite(os.path.join(uncertainty_output_dir, f"{frame_name}_uncertainty.png"), uncertainty_colored)
+                        
+                except Exception as e:
+                    print(f"Failed to generate uncertainty map for frame {idx}: {e}")
+        
+        print(f"Uncertainty maps saved to: {uncertainty_output_dir}")
 
     end_time = time.time()
     elapsed_time = end_time - start_time
