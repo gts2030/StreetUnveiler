@@ -167,3 +167,44 @@ def _save_depth_map(depth_map: torch.Tensor, cfg: Dict, idx: int) -> None:
     output_path = f"{depths_dir}/{idx:05d}.npy"
     final_depth = depth_map.detach().cpu().float().numpy()
     np.save(output_path, final_depth)
+
+
+def compute_metric_depth(depth_estimator, frame_id, gt_image_input, feature_cfg, rendered_depth=None):
+    """
+    Compute metric depth and optionally resize to match rendered depth shape.
+    
+    Args:
+        depth_estimator: Depth estimation model
+        frame_id: Frame ID for depth prediction
+        gt_image_input: Ground truth image tensor (with batch dimension)
+        feature_cfg: Feature configuration dictionary
+        rendered_depth: Optional rendered depth tensor for shape matching
+        
+    Returns:
+        torch.Tensor: Metric depth tensor
+    """
+    metric_depth = predict_metric_depth(
+        depth_estimator,
+        frame_id,
+        gt_image_input,
+        feature_cfg,
+        "cuda",
+        save_depth=False
+    )
+    
+    # Ensure correct dimensions
+    if metric_depth.dim() > 2:
+        metric_depth = metric_depth.squeeze()
+    
+    # Resize if rendered depth is provided and shapes don't match
+    if rendered_depth is not None:
+        rendered_depth_2d = rendered_depth.squeeze() if rendered_depth.dim() > 2 else rendered_depth
+        if metric_depth.shape != rendered_depth_2d.shape:
+            metric_depth = F.interpolate(
+                metric_depth.unsqueeze(0).unsqueeze(0), 
+                size=rendered_depth_2d.shape, 
+                mode='bilinear', 
+                align_corners=False
+            ).squeeze()
+    
+    return metric_depth

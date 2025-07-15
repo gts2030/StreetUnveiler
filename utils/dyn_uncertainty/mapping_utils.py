@@ -4,7 +4,7 @@ from math import exp
 import torch
 import torch.nn.functional as F
 from torch.autograd import Variable
-from src.utils.dyn_uncertainty.median_filter import MedianPool2d
+from utils.dyn_uncertainty.median_filter import MedianPool2d
 
 
 def resample_tensor_to_shape(
@@ -215,7 +215,11 @@ def compute_mapping_loss_components(
     ssim_fraction: float,
     uncertainty_config: dict,
     mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return_debug_info: bool = False,
+) -> Union[
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+]:
     """
     Compute essential components for uncertainty-aware mapping loss.
 
@@ -239,6 +243,12 @@ def compute_mapping_loss_components(
         ssim_fraction: SSIM loss weight fraction
         uncertainty_config: Dictionary containing uncertainty estimation parameters
         mask: Optional visibility mask for loss computation [1,H,W]
+        return_debug_info: Whether to return additional debug information
+        
+    Returns:
+        If return_debug_info=False: (uncertainty_loss, resized_uncertainty, rgb_l1_loss, depth_l1_loss)
+        If return_debug_info=True: Also returns (depth_mask, small_ssim_loss, small_opacity, small_depth, ssim_loss,
+                                               rendered_depth_masked, ref_depth_masked, small_depth_loss_before_penalize, small_depth_loss)
     """
     # Initialize median pooling for SSIM
     median_filter = MedianPool2d(
@@ -297,7 +307,7 @@ def compute_mapping_loss_components(
     )
 
     # Process depth loss for uncertainty computation
-    small_depth_loss = resample_tensor_to_shape(
+    small_depth_loss_before_penalize = resample_tensor_to_shape(
         torch.clip(depth_l1_loss.squeeze(), max=5.0).detach(),
         uncertainty.shape,
         "bicubic",
@@ -306,6 +316,7 @@ def compute_mapping_loss_components(
         ref_depth.squeeze().detach(), uncertainty.shape, "bicubic"
     )
     # do not penalize far away pixels
+    small_depth_loss = small_depth_loss_before_penalize.clone()
     small_depth_loss[small_depth > depth_threshold] = 0.0
 
     # Compute final uncertainty loss
@@ -320,7 +331,16 @@ def compute_mapping_loss_components(
         small_opacity < uncertainty_config["opacity_th_for_uncer_loss"]
     ] = 0
 
-    return uncertainty_loss, resized_uncertainty, rgb_l1_loss, depth_l1_loss
+    if return_debug_info:
+        # Additional debug info for small_depth_loss components
+        rendered_depth_masked = rendered_depth * depth_mask
+        ref_depth_masked = ref_depth * depth_mask
+        
+        return (uncertainty_loss, resized_uncertainty, rgb_l1_loss, depth_l1_loss, 
+                depth_mask, small_ssim_loss, small_opacity, small_depth, ssim_loss,
+                rendered_depth_masked, ref_depth_masked, small_depth_loss_before_penalize, small_depth_loss)
+    else:
+        return uncertainty_loss, resized_uncertainty, rgb_l1_loss, depth_l1_loss
 
 """Regularization loss for DINO model based on feature similarity."""
 # Constants

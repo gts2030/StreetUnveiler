@@ -1,0 +1,32 @@
+# Simple Training Configuration
+# Only override the values you want to change from defaults
+
+# Feature configuration - uncomment and modify if needed
+# feature_cfg:
+#   mono_prior:
+#     depth: "metric3d_vit_small"  # or metric3d_vit_large
+#     feature_extractor: "dinov2_reg_small_fine"
+#   cam:
+#     fx: 800.0  # Different focal length
+
+# Loss Weights - tune these for your experiment
+loss_weights:
+  semantic_ce_weights: [1.0, 1.0, 1.0, 1.0, 0.5, 1.0]  # Increased sky weight from 0.2 to 0.5
+  uncertainty_lambda1: 1.5  # Increased from 1.0
+  uncertainty_lambda2: 0.005  # Decreased from 0.01
+  render_lambda7: 0.005  # Decreased isotropic regularization
+
+# Uncertainty settings
+uncertainty:
+  ssim_window_size: 11  # Increased from 7
+  uncer_depth_mult: 0.15  # Decreased from 0.2
+
+# Progress bar customization
+progress:
+  update_interval: 5  # Update more frequently
+  training_title: "🚀 My Experiment Training"
+
+# Output settings
+output:
+  uncertainty_colormap: "plasma"  # Changed from jet
+  depth_colormap: "viridis"  # Changed from jet 

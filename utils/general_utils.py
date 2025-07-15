@@ -114,6 +114,7 @@ def safe_state(silent):
     class F:
         def __init__(self, silent):
             self.silent = silent
+            self.old_f = old_f
 
         def write(self, x):
             if not self.silent:
@@ -124,6 +125,21 @@ def safe_state(silent):
 
         def flush(self):
             old_f.flush()
+
+        def fileno(self):
+            return self.old_f.fileno()
+
+        def isatty(self):
+            return self.old_f.isatty()
+
+        def readable(self):
+            return self.old_f.readable()
+
+        def writable(self):
+            return self.old_f.writable()
+
+        def seekable(self):
+            return self.old_f.seekable()
 
     sys.stdout = F(silent)
 
@@ -151,14 +167,15 @@ def requires_grad(model, flag=True):
     for p in model.parameters():
         p.requires_grad = flag
 
-def colormap(img, cmap='jet'):
+def colormap(img, cmap='jet', show_colorbar=False):
     import matplotlib.pyplot as plt
     W, H = img.shape[:2]
     dpi = 300
     fig, ax = plt.subplots(1, figsize=(H/dpi, W/dpi), dpi=dpi)
     im = ax.imshow(img, cmap=cmap)
     ax.set_axis_off()
-    fig.colorbar(im, ax=ax)
+    if show_colorbar:
+        fig.colorbar(im, ax=ax)
     fig.tight_layout()
     fig.canvas.draw()
     data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
@@ -166,3 +183,55 @@ def colormap(img, cmap='jet'):
     img = torch.from_numpy(data / 255.).float().permute(2,0,1)
     plt.close()
     return img
+
+def save_tensor_as_colormap_image(tensor, output_path, cmap='jet', frame_name=None):
+    """
+    Save a tensor as a colormap image (PNG format).
+    
+    Args:
+        tensor: Input tensor (torch.Tensor or numpy.ndarray)
+        output_path: Output file path (should end with .png)
+        cmap: Colormap name (default: 'jet')
+        frame_name: Optional frame name for error messages
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    import cv2
+    
+    try:
+        # Convert to numpy if it's a tensor
+        if isinstance(tensor, torch.Tensor):
+            tensor_np = tensor.detach().cpu().numpy()
+        else:
+            tensor_np = tensor
+        
+        # Ensure 2D array by squeezing extra dimensions
+        if tensor_np.ndim > 2:
+            tensor_np = tensor_np.squeeze()
+        
+        # Apply colormap
+        heatmap = colormap(tensor_np, cmap=cmap)
+        
+        # Handle both torch tensor and numpy array returns from colormap
+        if isinstance(heatmap, torch.Tensor):
+            colored_image = (heatmap * 255).detach().cpu().numpy().astype(np.uint8)
+        else:
+            colored_image = (heatmap * 255).astype(np.uint8)
+        
+        # Ensure proper shape for OpenCV (H, W, 3)
+        if colored_image.ndim == 3 and colored_image.shape[0] == 3:
+            colored_image = colored_image.transpose(1, 2, 0)  # CHW -> HWC
+        elif colored_image.ndim != 3 or colored_image.shape[-1] != 3:
+            print(f"Warning: Unexpected image shape: {colored_image.shape}")
+            return False
+        
+        # Save with OpenCV (convert RGB to BGR for proper color display)
+        cv2.imwrite(output_path, cv2.cvtColor(colored_image, cv2.COLOR_RGB2BGR))
+        return True
+        
+    except Exception as e:
+        frame_info = f" for frame {frame_name}" if frame_name else ""
+        print(f"Failed to save image{frame_info}: {e}")
+        print(f"Tensor shape: {tensor.shape if hasattr(tensor, 'shape') else 'N/A'}")
+        return False
