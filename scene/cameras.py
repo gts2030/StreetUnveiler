@@ -82,6 +82,20 @@ class Camera(nn.Module):
 
         return semantic_prob_image
 
+    def get_uncertainty_no_grad(self, uncertainty_network, uncer_params=None):
+        """
+        Compute the uncertainty for this viewpoint without gradient computation.
+        
+        Args:
+            uncertainty_network: The uncertainty MLP network
+            uncer_params: Dictionary containing uncertainty parameters (especially train_frac_fix)
+            
+        Returns:
+            uncertainty_adjusted: Processed uncertainty values (uncertainty^2)
+        """
+        from utils.dyn_uncertainty.uncertainty_model import get_viewpoint_uncertainty_no_grad
+        return get_viewpoint_uncertainty_no_grad(uncertainty_network, self, uncer_params, device=str(self.data_device))
+
 
 class MiniCam:
     def __init__(self, width, height, fovy, fovx, znear, zfar, world_view_transform, full_proj_transform):
