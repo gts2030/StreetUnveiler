@@ -215,10 +215,12 @@ def compute_mapping_loss_components(
     ssim_fraction: float,
     uncertainty_config: dict,
     mask: Optional[torch.Tensor] = None,
+    gt_dino_features: Optional[torch.Tensor] = None,
+    rendered_dino_features: Optional[torch.Tensor] = None,
     return_debug_info: bool = False,
 ) -> Union[
     Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
-    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
 ]:
     """
     Compute essential components for uncertainty-aware mapping loss.
@@ -248,7 +250,8 @@ def compute_mapping_loss_components(
     Returns:
         If return_debug_info=False: (uncertainty_loss, resized_uncertainty, rgb_l1_loss, depth_l1_loss)
         If return_debug_info=True: Also returns (depth_mask, small_ssim_loss, small_opacity, small_depth, ssim_loss,
-                                               rendered_depth_masked, ref_depth_masked, small_depth_loss_before_penalize, small_depth_loss)
+                                               rendered_depth_masked, ref_depth_masked, small_depth_loss_before_penalize, 
+                                               small_depth_loss, dino_cosine_similarity, depth_threshold, median_depth)
     """
     # Initialize median pooling for SSIM
     median_filter = MedianPool2d(
@@ -264,7 +267,7 @@ def compute_mapping_loss_components(
 
     # Compute depth loss with adaptive thresholding
     median_depth = ref_depth.median()
-    depth_threshold = min(10 * median_depth, 50)
+    depth_threshold = min(3 * median_depth, 100)
     depth_mask = ((ref_depth > 0.01) & (ref_depth < depth_threshold)).view(
         *rendered_depth.shape
     )
@@ -310,19 +313,47 @@ def compute_mapping_loss_components(
     small_depth_loss_before_penalize = resample_tensor_to_shape(
         torch.clip(depth_l1_loss.squeeze(), max=5.0).detach(),
         uncertainty.shape,
-        "bicubic",
+        "bilinear",
     )
     small_depth = resample_tensor_to_shape(
-        ref_depth.squeeze().detach(), uncertainty.shape, "bicubic"
+        ref_depth.squeeze().detach(), uncertainty.shape, "bilinear"
     )
     # do not penalize far away pixels
     small_depth_loss = small_depth_loss_before_penalize.clone()
     small_depth_loss[small_depth > depth_threshold] = 0.0
 
-    # Compute final uncertainty loss
+    # DINO feature cosine similarity loss computation
+    small_dino_loss = torch.zeros_like(filtered_ssim_loss)
+    dino_cosine_similarity = None
+    if gt_dino_features is not None and rendered_dino_features is not None:
+        try:
+            # Reshape features for cosine similarity computation if needed
+            if gt_dino_features.dim() == 3:  # (H, W, C)
+                gt_features_flat = gt_dino_features.view(-1, gt_dino_features.shape[-1])  # (H*W, C)
+                rendered_features_flat = rendered_dino_features.view(-1, rendered_dino_features.shape[-1])  # (H*W, C)
+                
+                # Compute cosine similarity: (1 - cos_sim).sub(0.5).div(0.5).clip(0, 1)
+                cos_sim = torch.nn.functional.cosine_similarity(
+                    gt_features_flat, rendered_features_flat, dim=-1
+                )  # (H*W,)
+                
+                # Apply user's transformation
+                dino_cosine_similarity = (1 - cos_sim).sub(0.5).div(0.5).clamp(0.0, 1.0)
+                dino_cosine_similarity = dino_cosine_similarity.view(gt_dino_features.shape[:2])  # (H, W)
+                
+                # Resize to uncertainty shape
+                small_dino_loss = resample_tensor_to_shape(
+                    dino_cosine_similarity.detach(), uncertainty.shape, "bilinear"
+                )
+            else:
+                print("[WARNING] Unexpected DINO features shape for cosine similarity computation")
+        except Exception as e:
+            print(f"[WARNING] Failed to compute DINO cosine similarity: {e}")
+
+    # Compute final uncertainty loss (with DINO feature term)
     uncertainty_loss = (
-        filtered_ssim_loss / processed_uncertainty ** 2
-        + 0.5 * torch.log(processed_uncertainty)
+        torch.min(filtered_ssim_loss, small_dino_loss) / processed_uncertainty ** 2
+        + 0.25 * torch.log(processed_uncertainty)
         + uncertainty_config["uncer_depth_mult"]
         * small_depth_loss
         / processed_uncertainty ** 2
@@ -332,13 +363,14 @@ def compute_mapping_loss_components(
     ] = 0
 
     if return_debug_info:
-        # Additional debug info for small_depth_loss components
+        # Additional debug info for depth components
         rendered_depth_masked = rendered_depth * depth_mask
         ref_depth_masked = ref_depth * depth_mask
         
         return (uncertainty_loss, resized_uncertainty, rgb_l1_loss, depth_l1_loss, 
                 depth_mask, small_ssim_loss, small_opacity, small_depth, ssim_loss,
-                rendered_depth_masked, ref_depth_masked, small_depth_loss_before_penalize, small_depth_loss)
+                rendered_depth_masked, ref_depth_masked, small_depth_loss_before_penalize, 
+                small_depth_loss, dino_cosine_similarity, depth_threshold, median_depth)
     else:
         return uncertainty_loss, resized_uncertainty, rgb_l1_loss, depth_l1_loss
 

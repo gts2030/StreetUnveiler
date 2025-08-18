@@ -3,9 +3,12 @@
 
 # Feature Extraction and Depth Estimation Configuration
 feature_cfg:
+  # Enable/disable feature-based losses
+  enabled: true  # Set to false to disable feature extraction and depth-based losses
+  
   device: "cuda"
   mono_prior:
-    feature_extractor: "dinov2_reg_small_fine"  # For uncertainty prediction
+    feature_extractor: "dinov2_reg_small_fine"  # Feature extractor for uncertainty prediction
     depth: "metric3d_vit_large"  # Depth estimation model
   data:
     output: null  # Will be set dynamically to dataset.model_path
@@ -15,27 +18,55 @@ feature_cfg:
 
 # Uncertainty Configuration
 uncertainty:
+  # Enable/disable uncertainty estimation
+  enabled: true  # Set to false to disable uncertainty loss computation
+  
+  # Learning rate and optimization parameters
+  lr: 0.0004  # Learning rate for uncertainty MLP
+  weight_decay: 0.00001  # Weight decay for uncertainty MLP optimizer
+  
+  # MLP architecture parameters
+  input_features: 384  # Number of input features from feature extractor
+  hidden_dim: 64  # Hidden layer dimension
+  net_depth: 2  # Number of hidden layers
+  
+  # Loss computation parameters
   ssim_median_filter_size: 5
   ssim_window_size: 7
   uncer_depth_mult: 0.2
+  dino_feature_mult: 0.5  # Weight for DINO feature cosine similarity loss
   opacity_th_for_uncer_loss: 0.9
   fallback_loss_weight: 0.01  # Fallback simple uncertainty loss weight
   beta_epsilon: 1.0e-8  # Small epsilon to avoid division by zero in uncertainty computation
+  train_frac_fix: 0.3
+  
+  # DINO feature regularization parameters
+  reg_stride: 2
+  reg_mult: 0.5
+  
+  # RGB boundary threshold for valid pixel mask
+  rgb_boundary_threshold: 0.01
 
 # Loss Weights and Parameters
 loss_weights:
   # Semantic loss weights for cross entropy (6 classes)
   semantic_ce_weights: [1.0, 1.0, 1.0, 1.0, 0.2, 1.0]
   
+  # Feature and depth loss weights
+  feature_loss_weight: 0.1  # Weight for depth-based feature loss
+  
   # Render loss lambda parameters (from paper)
-  render_lambda5: 1.0  # Color loss weight in render loss
-  render_lambda6: 1.0  # Depth loss weight in render loss
-  render_lambda7: 0.01  # Isotropic regularization weight in render loss
+  render_lambda5: 0.5  # Color loss weight in render loss
+  render_lambda6: 0.5  # Depth loss weight in render loss
+  render_lambda7: 0.5  # Isotropic regularization weight in render loss
   
   # Uncertainty loss lambda parameters
   uncertainty_lambda1: 1.0  # Weight for depth uncertainty term
   uncertainty_lambda2: 0.01  # Weight for variance regularization
   uncertainty_lambda3: 0.01  # Weight for uncertainty regularization
+  
+  # Semantic-aware uncertainty regularization
+  lambda_sem_cons: 0  # Intra-class consistency weight for uncertainty map
 
 # Training Progress and Logging
 progress:

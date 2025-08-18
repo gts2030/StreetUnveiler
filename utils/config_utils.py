@@ -19,12 +19,17 @@ def get_default_config():
     return {
 
         'uncertainty': {
+            'enabled': True,  # Enable uncertainty loss by default
             'ssim_median_filter_size': 5,
             'ssim_window_size': 7,
             'uncer_depth_mult': 0.1,
+            'dino_feature_mult': 0.1,  # Default DINO feature loss weight
             'opacity_th_for_uncer_loss': 0.9,
             'fallback_loss_weight': 0.01,
-            'beta_epsilon': 1e-8
+            'beta_epsilon': 1e-8,
+            'train_frac_fix': 0.3,
+            'reg_stride': 2,
+            'reg_mult': 0.5
         },
         'loss_weights': {
             'semantic_ce_weights': [1.0, 1.0, 1.0, 1.0, 0.2, 1.0],
@@ -43,6 +48,7 @@ def get_default_config():
             'dont_prune_classes': ['sky', 'vegetation']
         },
         'feature_cfg': {
+            'enabled': True,  # Enable feature extraction by default
             'device': 'cuda',
             'mono_prior': {
                 'feature_extractor': 'dinov2_vits14_reg',

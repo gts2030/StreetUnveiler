@@ -96,15 +96,15 @@ class MLPNetwork(nn.Module):
 
         return x
 
-    def setup_training(self, lr: float = 0.0001, optimizer_type: str = 'adam'):
+    def setup_training(self, lr: float = 0.0004, weight_decay: float = 0.00001, optimizer_type: str = 'adam'):
         """Initialize optimizer for uncertainty MLP training"""
         if optimizer_type.lower() == 'adam':
-            self.optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+            self.optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
         elif optimizer_type.lower() == 'sgd':
-            self.optimizer = torch.optim.SGD(self.parameters(), lr=lr)
+            self.optimizer = torch.optim.SGD(self.parameters(), lr=lr, weight_decay=weight_decay)
         else:
             raise ValueError(f"Unknown optimizer type: {optimizer_type}")
-        print(f"Uncertainty MLP optimizer ({optimizer_type}) initialized with lr={lr}")
+        print(f"Uncertainty MLP optimizer ({optimizer_type}) initialized with lr={lr}, weight_decay={weight_decay}")
 
     def step_optimizer(self):
         """Step the optimizer and zero gradients"""
@@ -155,14 +155,15 @@ class MLPNetwork(nn.Module):
         print(f"Uncertainty MLP checkpoint loaded: {checkpoint_path} (iteration {iteration})")
         return True
 
-def generate_uncertainty_mlp(n_features: int, lr: float = 0.0001, setup_training: bool = True, 
-                            hidden_dim: int = 64, net_depth: int = 2) -> MLPNetwork:
+def generate_uncertainty_mlp(n_features: int, lr: float = 0.0004, weight_decay: float = 0.00001, 
+                            setup_training: bool = True, hidden_dim: int = 64, net_depth: int = 2) -> MLPNetwork:
     """
     Create uncertainty MLP for per-pixel uncertainty prediction.
     
     Args:
         n_features: Number of input features from feature extractor
         lr: Learning rate for optimizer
+        weight_decay: Weight decay for optimizer regularization
         setup_training: Whether to initialize optimizer
         hidden_dim: Hidden layer dimension
         net_depth: Number of hidden layers
@@ -180,7 +181,7 @@ def generate_uncertainty_mlp(n_features: int, lr: float = 0.0001, setup_training
     ).cuda()
     
     if setup_training:
-        network.setup_training(lr=lr)
+        network.setup_training(lr=lr, weight_decay=weight_decay)
     
     return network
 

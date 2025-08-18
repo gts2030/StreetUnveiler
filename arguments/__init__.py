@@ -84,7 +84,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_normal = 0.05
         self.opacity_cull = 0.005
 
-        self.enable_semantic_loss = True
+        self.enable_semantic_loss = False
         self.semantic_loss_ratio = 0.1
 
         # Feature extractor parameters
