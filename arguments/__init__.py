@@ -121,6 +121,19 @@ class OptimizationParams(ParamGroup):
 
         self.shrinking_from_iter = 31_000
         self.lambda_shrink = 0.001
+         # ----- New: Uncertainty weighting -----
+        self.use_uncertainty_weighting = False
+        self.uncertainty_eps = 1e-3
+        self.uncertainty_power = 2.0          # 1/(eps + u^power)
+        self.uncertainty_weight_clip = 25.0   # 가중치 상한(0이면 비활성)
+        # ----- New: Opacity decay for uncertain vehicles -----
+        self.uncertainty_decay_from_iter = 20_000
+        self.uncertainty_decay_interval = 500
+        self.uncertainty_decay_factor = 0.95  # (0~1) 곱셈계수, 1에 가까울수록 약하게 감쇠
+        self.vehicle_shrink_from_iter = 20_000
+        self.lambda_vehicle_shrink = 0.005    # 불확실한 차량 가우시안 평균 opacity에 정규화 항
+        # ----- New: Vehicle-specific pruning threshold -----
+        self.prune_vehicle_opacity = 0.55     # 일반 프루닝보다 더 높게
 
         if parser is not None:
             super().__init__(parser, "MaskOptimization Parameters")

@@ -334,6 +334,21 @@ class GaussianModel:
             new_opacities_new[mask] = opacities_new[mask]
         optimizable_tensors = self.replace_tensor_to_optimizer(new_opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+    # ----- New: smooth opacity decay for a masked subset of Gaussians -----
+    def decay_opacity_with_mask(self, mask, factor: float = 0.95, floor: float = 1e-4, ceil: float = 0.999):
+        """
+        mask  : [N] bool
+        factor: 곱셈 계수(0~1). 1에 가까울수록 약한 감쇠.
+        floor/ceil: 수치 안정성용 하한/상한
+        """
+        with torch.no_grad():
+            current = self.get_opacity
+            decayed = torch.clamp(current * factor, min=floor, max=ceil)
+            new_logits = inverse_sigmoid(decayed)
+            updated_logits = self._opacity.clone()
+            updated_logits[mask] = new_logits[mask]
+            optimizable = self.replace_tensor_to_optimizer(updated_logits, "opacity")
+            self._opacity = optimizable["opacity"]
 
     def load_ply(self, path):
         plydata = PlyData.read(path)

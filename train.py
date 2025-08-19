@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from random import randint
 import yaml
 from datetime import datetime
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, weighted_l1, weighted_mean_map
 from utils.config_utils import load_training_config, print_config_summary
 from gaussian_renderer import render, render_semantic
 import sys
@@ -234,16 +234,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 pipe.debug = True
 
             loss_dict = {}
-
+            # 항상 semantic 패키지를 먼저 얻어 불확실도 맵을 확보
+            semantic_pkg = render_semantic(viewpoint_cam, gaussians, pipe, background)
+            render_semantics = semantic_pkg["render_semantics"]        # [6,H,W]
+            sem_uncertainty = semantic_pkg["semantic_uncertainty"]     # [1,H,W]
             if opt.enable_semantic_loss:
-                render_pkg = render_semantic(viewpoint_cam, gaussians, pipe, background)
-                render_semantics = render_pkg["render_semantics"]
                 gt_semantic = viewpoint_cam.get_semantic_prob_image()
-                semantic_loss = F.cross_entropy(render_semantics.unsqueeze(0), gt_semantic.unsqueeze(0), weight=torch.tensor(loss_weights_cfg['semantic_ce_weights']).cuda())
-
+                semantic_loss = F.cross_entropy(render_semantics.unsqueeze(0), gt_semantic.unsqueeze(0),
+                                                weight=torch.tensor([1.0, 1.0, 1.0, 1.0, 0.2, 1.0]).cuda())
                 loss_dict['semantic'] = semantic_loss
                 semantic_loss = opt.semantic_loss_ratio * semantic_loss
-
                 semantic_dist_loss = 0
                 if iteration > opt.semantic_dist_from_iter:
                     for semantic_idx, semantic_name in enumerate(concerned_classes_list):
@@ -577,7 +577,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     uncertainty_map = uncertainty_map.squeeze()
                 
                 # Recompute color loss for render loss (independent computational graph)
-                render_Ll1 = l1_loss(composite_image, gt_image)
+                if opt.use_uncertainty_weighting:
+                    # w = 1/(eps + u^power), clip으로 폭주 방지
+                    w = 1.0 / (opt.uncertainty_eps + sem_uncertainty.pow(opt.uncertainty_power))
+                    if opt.uncertainty_weight_clip > 0:
+                        w = w.clamp(max=opt.uncertainty_weight_clip)
+                    render_Ll1 = weighted_l1(composite_image, gt_image, w)
+                else:
+                    w = None
+                    render_Ll1 = l1_loss(composite_image, gt_image)
                 render_Lssim, _ = ssim(composite_image, gt_image)
                 L_color = (1.0 - opt.lambda_dssim) * render_Ll1 + opt.lambda_dssim * (1.0 - render_Lssim)
                 
@@ -623,8 +631,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             rend_dist = render_pkg["rend_dist"]
             rend_normal = render_pkg['rend_normal']
             surf_normal = render_pkg['surf_normal']
-            normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-            normal_loss = lambda_normal * (normal_error).mean()
+            normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]  # [1,H,W]
+            if opt.use_uncertainty_weighting and lambda_normal > 0:
+                normal_loss = lambda_normal * weighted_mean_map(normal_error, w)
+            else:
+                normal_loss = lambda_normal * (normal_error).mean()
 
             # loss
             loss += normal_loss / beta_squared.mean()
@@ -632,7 +643,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss_dict['Lnormal'] = normal_loss
 
             lambda_dist = opt.lambda_dist if iteration > opt.semantic_dist_from_iter else 0.0
-            dist_loss = lambda_dist * (rend_dist).mean()
+            if opt.use_uncertainty_weighting and lambda_dist > 0:
+                dist_loss = lambda_dist * weighted_mean_map(rend_dist, w)
+            else:
+                dist_loss = lambda_dist * (rend_dist).mean()
             loss += dist_loss
             loss_dict['Ldist'] = dist_loss / beta_squared.mean()
 
@@ -640,6 +654,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             shrink_loss = lambda_shrink * gaussians.get_opacity.mean()
             loss += shrink_loss
             loss_dict['Lshrink'] = shrink_loss / beta_squared.mean()
+            # ----- New: 차량에 대한 불확실도 가중 shrink 정규화 -----
+            if iteration > opt.vehicle_shrink_from_iter and opt.lambda_vehicle_shrink > 0:
+                veh_idx = concerned_classes_ind_map['vehicle']
+                veh_prob = render_semantics[veh_idx:veh_idx+1]  # [1,H,W]
+                vehicle_unc_scalar = (veh_prob * sem_uncertainty).mean()
+                vehicle_mask = gaussians.get_semantic_index_splatting_mask(veh_idx)
+                if vehicle_mask.any():
+                    veh_opacity_mean = gaussians.get_opacity[vehicle_mask].mean()
+                    vehicle_shrink = opt.lambda_vehicle_shrink * vehicle_unc_scalar * veh_opacity_mean
+                    loss += vehicle_shrink
+                    loss_dict['Lvehicle_shrink'] = vehicle_shrink
 
             loss.backward()  # Gaussian만 업데이트
 
@@ -679,7 +704,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         and iteration > opt.prune_from_iter
                         and iteration % opt.prune_interval == 0
                 ):
-                    prune_mask = (gaussians.get_opacity < 0.5).squeeze()
+                    # 기본 프루닝: 설정에서 제공하는 임계치 사용
+                    prune_mask = (gaussians.get_opacity.squeeze() < opt.prune_opacity)
 
                     # sky and vegetation may be transparent
                     sky_bit = 1 << concerned_classes_ind_map["sky"]
@@ -687,6 +713,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     dont_prune_semantic_bit = sky_bit | vegetation_bit
 
                     prune_mask *= ((gaussians.get_semantics_32bit & dont_prune_semantic_bit) == 0)
+                    # 차량은 더 공격적인 임계치로 프루닝
+                    veh_mask = gaussians.get_semantic_index_splatting_mask(concerned_classes_ind_map["vehicle"])
+                    prune_mask = torch.logical_or(prune_mask, torch.logical_and(veh_mask, gaussians.get_opacity.squeeze() < opt.prune_vehicle_opacity))
                     gaussians.prune_points(prune_mask)
 
                     torch.cuda.empty_cache()
@@ -710,6 +739,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     
                     # Save uncertainty MLP checkpoint using Scene method
                     scene.save_checkpoint(iteration)
+                    
+                # ----- New: 주기적 차량 opacity 감쇠(불확실도 스케일 적용) -----
+                if (opt.use_uncertainty_weighting and
+                    iteration >= opt.uncertainty_decay_from_iter and
+                    iteration % opt.uncertainty_decay_interval == 0):
+                    veh_idx = concerned_classes_ind_map['vehicle']
+                    veh_mask = gaussians.get_semantic_index_splatting_mask(veh_idx)
+                    if veh_mask.any():
+                        # 현재 뷰에서 차량 영역의 평균 불확실도를 이용해 decay 강도를 조절
+                        veh_prob = render_semantics[veh_idx:veh_idx+1]
+                        global_unc = (veh_prob * sem_uncertainty).mean().item()
+                        # 1.0에 가까울수록 약한 감쇠, 불확실도가 높을수록 더 감쇠
+                        decay = 1.0 - (1.0 - opt.uncertainty_decay_factor) * float(global_unc)
+                        decay = max(0.0, min(decay, 1.0))
+                        if decay < 0.999:
+                            gaussians.decay_opacity_with_mask(veh_mask, decay)
+                    
+                
 
     # Generate uncertainty maps and depth maps for all input images at the end of training
     if scene.uncertainty_mlp is not None and feature_extractor is not None:

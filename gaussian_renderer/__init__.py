@@ -448,6 +448,9 @@ def render_semantic(
     topk_values, topk_indices = torch.topk(output_semantic, k=2, dim=0)
     difference = topk_values[0, ...] - topk_values[1, ...]
     uncertainty = (1. - difference)
+    difference = topk_values[0, ...] - topk_values[1, ...]
+    # [1,H,W]로 정규화하여 이후 손실 가중에 바로 사용
+    uncertainty = (1. - difference)[None, ...]
 
     semantic_rgb = semantic_prob_to_rgb(output_semantic) / 255.
 

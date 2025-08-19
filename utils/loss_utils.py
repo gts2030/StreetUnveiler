@@ -15,6 +15,31 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 
+# ---------- New: weighted losses ----------
+def weighted_l1(pred, gt, weight, eps: float = 1e-6):
+    """
+    pred, gt: [3,H,W] (values in [0,1])
+    weight : [1,H,W] or [H,W]  (larger => 더 큰 비중)
+    """
+    if weight.dim() == 2:
+        weight = weight.unsqueeze(0)
+    # 채널 평균 L1을 픽셀 단위로 만들고 가중 평균
+    l1_per_pixel = torch.abs(pred - gt).mean(dim=-3, keepdim=True)
+    w = weight / (weight.mean() + eps)
+    return (w * l1_per_pixel).sum() / (w.sum() + eps)
+
+def weighted_mean_map(val_map, weight, eps: float = 1e-6):
+    """
+    val_map: [1,H,W] 형태의 스칼라 맵(예: distortion, normal error 등)
+    weight : [1,H,W] 또는 [H,W]
+    """
+    if val_map.dim() == 2:
+        val_map = val_map.unsqueeze(0)
+    if weight.dim() == 2:
+        weight = weight.unsqueeze(0)
+    w = weight / (weight.mean() + eps)
+    return (w * val_map).sum() / (w.sum() + eps)
+
 def l1_loss(network_output, gt):
     return torch.abs((network_output - gt)).mean()
 
