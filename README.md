@@ -62,6 +62,41 @@ nuScenes: Please follow [this instruction](docs/nuscenes.md).
 
 # Installation
 
+## Option 1: UV (Recommended - Faster)
+
+```bash
+# Make sure uv is installed (https://docs.astral.sh/uv/getting-started/installation/)
+# Install uv if you haven't: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create and activate UV environment
+uv venv --python 3.10
+source .venv/bin/activate
+
+# Install dependencies
+uv sync
+
+# Initialize submodules and install them manually
+# Note: Submodules must be installed manually due to build-time dependencies on PyTorch
+git submodule update --init --recursive
+
+# Install submodules (these require PyTorch to be available during compilation)
+uv pip install ./submodules/superpose3d --no-build-isolation
+uv pip install ./submodules/sh_encoder --no-build-isolation
+uv pip install ./submodules/simple-knn --no-build-isolation  # Contains required functions
+uv pip install ./submodules/diff-surfel-rasterization --no-build-isolation
+uv pip install ./submodules/tiny-cuda-nn/bindings/torch --no-build-isolation
+uv pip install ./submodules/pandaset-devkit/python --no-build-isolation
+
+# Test installation
+python test_uv_env.py
+
+# Important: Use LOCAL simple-knn submodule
+# This version contains required functions (meanDistFromReferencePcd, dist3knn, dist10knn)
+# that are not available in the GitHub camenduru/simple-knn version
+```
+
+## Option 2: Conda (Traditional)
+
 ```bash
 conda create -n streetunveiler python=3.10
 conda activate streetunveiler
@@ -74,7 +109,7 @@ pip install -r requirements.txt
 git submodule update --init --recursive
 pip install submodules/superpose3d
 pip install submodules/sh_encoder
-pip install git+https://github.com/camenduru/simple-knn
+pip install submodules/simple-knn
 pip install submodules/diff-surfel-rasterization
 
 cd submodules/tiny-cuda-nn/bindings/torch
@@ -84,6 +119,35 @@ pip install .
 cd submodules/pandaset-devkit/python
 pip install .
 ```
+
+## Environment Activation
+
+```bash
+# For UV environment
+source .venv/bin/activate
+
+# For Conda environment  
+conda activate streetunveiler
+```
+
+## Important Notes
+
+### Simple-KNN Version
+This project requires the **LOCAL submodule version** of simple-knn, NOT the GitHub camenduru/simple-knn version. The local version contains essential functions:
+- `meanDistFromReferencePcd` - Required for inpainting pipeline
+- `dist3knn` - Required for Gaussian initialization  
+- `dist10knn` - Additional distance computation
+
+### Installation Order
+⚠️ **Critical**: Install submodules AFTER activating the environment and running `uv sync`. The submodules depend on PyTorch being available during compilation.
+
+### Why Manual Installation?
+UV's dependency resolver cannot handle the circular dependency where:
+1. Submodules need PyTorch during build time
+2. PyTorch needs to be installed first via `uv sync`
+3. Submodules have custom CUDA compilation requirements
+
+Therefore, we use `uv pip install --no-build-isolation` for submodules only.
 
 # Inpainting Pretrained Model Preparation
 
@@ -179,6 +243,10 @@ data
 ## Stage 1: Reconstruction
 
 ```bash
+# Activate your environment first
+# For UV: source .venv/bin/activate
+# For Conda: conda activate streetunveiler
+
 # --source_path/-s: the path to the preprocessed data root, to read the lidars
 # --colmap_path/-c: the path to the colmap processed data root, to read the SfM points
 # --model_path/-m: the path to save the output model
