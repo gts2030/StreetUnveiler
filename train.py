@@ -18,7 +18,7 @@ from scene.env_map import SkyModel
 from utils.general_utils import safe_state, requires_grad
 from utils.system_utils import mkdir_p
 import uuid
-from tqdm import tqdm
+from alive_progress import alive_bar
 from utils.image_utils import psnr
 from utils.semantic_utils import concerned_classes_ind_map, concerned_classes_list, semantic_prob_to_rgb
 from argparse import ArgumentParser, Namespace
@@ -56,155 +56,156 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     opt.densification_interval = int(len(scene.getTrainCameras()) * 1.15)
     print(opt.densification_interval)
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    total_iterations = opt.iterations - first_iter
     first_iter += 1
     gaussians.prune_semantic_splatting(1 << concerned_classes_ind_map['sky'])
-    for iteration in range(first_iter, opt.iterations + 1):
+    
+    import sys
+    with alive_bar(total_iterations, title="🚀 Training Dynamic StreetUnveiler", bar="smooth", spinner="waves", file=sys.stderr) as bar:
+        for iteration in range(first_iter, opt.iterations + 1):
+            iter_start.record()
 
-        iter_start.record()
+            gaussians.update_learning_rate(iteration)
 
-        gaussians.update_learning_rate(iteration)
+            # Every 1000 its we increase the levels of SH up to a maximum degree
+            if iteration % 1000 == 0:
+                gaussians.oneupSHdegree()
 
-        # Every 1000 its we increase the levels of SH up to a maximum degree
-        if iteration % 1000 == 0:
-            gaussians.oneupSHdegree()
+            if not viewpoint_stack:
+                viewpoint_stack = [i for i in range(len(scene.getTrainCameras()))]
 
-        if not viewpoint_stack:
-            viewpoint_stack = [i for i in range(len(scene.getTrainCameras()))]
+            select_frame_id = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+            viewpoint_cam = scene.getTrainCameras()[select_frame_id]
 
-        select_frame_id = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
-        viewpoint_cam = scene.getTrainCameras()[select_frame_id]
+            # Render
+            if (iteration - 1) == debug_from:
+                pipe.debug = True
 
-        # Render
-        if (iteration - 1) == debug_from:
-            pipe.debug = True
+            loss_dict = {}
 
-        loss_dict = {}
+            if opt.enable_semantic_loss:
+                render_pkg = render_semantic(viewpoint_cam, gaussians, pipe, background)
+                render_semantics = render_pkg["render_semantics"]
+                gt_semantic = viewpoint_cam.get_semantic_prob_image()
+                semantic_loss = F.cross_entropy(render_semantics.unsqueeze(0), gt_semantic.unsqueeze(0), weight=torch.tensor([1.0, 1.0, 1.0, 1.0, 0.2, 1.0]).cuda())
 
-        if opt.enable_semantic_loss:
-            render_pkg = render_semantic(viewpoint_cam, gaussians, pipe, background)
-            render_semantics = render_pkg["render_semantics"]
-            gt_semantic = viewpoint_cam.get_semantic_prob_image()
-            semantic_loss = F.cross_entropy(render_semantics.unsqueeze(0), gt_semantic.unsqueeze(0), weight=torch.tensor([1.0, 1.0, 1.0, 1.0, 0.2, 1.0]).cuda())
+                loss_dict['semantic'] = semantic_loss
+                semantic_loss = opt.semantic_loss_ratio * semantic_loss
 
-            loss_dict['semantic'] = semantic_loss
-            semantic_loss = opt.semantic_loss_ratio * semantic_loss
+                semantic_dist_loss = 0
+                if iteration > opt.semantic_dist_from_iter:
+                    for semantic_idx, semantic_name in enumerate(concerned_classes_list):
+                        if semantic_name == 'sky':
+                            continue
+                        current_semantic_bit = (1 << semantic_idx)
+                        single_semantic_render_pkg = render(viewpoint_cam, gaussians, pipe, background, semantic_filter_bit=current_semantic_bit, reverse_semantic=True)
+                        single_semantic_rend_dist = single_semantic_render_pkg['rend_dist']
+                        dist_scaling = 1.0
+                        semantic_dist_loss += opt.lambda_dist * single_semantic_rend_dist.mean() * dist_scaling
+                    loss_dict['Lsingle_semantic_distortion'] = semantic_dist_loss
 
-            semantic_dist_loss = 0
-            if iteration > opt.semantic_dist_from_iter:
-                for semantic_idx, semantic_name in enumerate(concerned_classes_list):
-                    if semantic_name == 'sky':
-                        continue
-                    current_semantic_bit = (1 << semantic_idx)
-                    single_semantic_render_pkg = render(viewpoint_cam, gaussians, pipe, background, semantic_filter_bit=current_semantic_bit, reverse_semantic=True)
-                    single_semantic_rend_dist = single_semantic_render_pkg['rend_dist']
-                    dist_scaling = 1.0
-                    semantic_dist_loss += opt.lambda_dist * single_semantic_rend_dist.mean() * dist_scaling
-                loss_dict['Lsingle_semantic_distortion'] = semantic_dist_loss
+                semantic_loss += semantic_dist_loss
 
-            semantic_loss += semantic_dist_loss
+                semantic_loss.backward()
 
-            semantic_loss.backward()
+            render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+            render_image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        render_image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+            # Loss
+            gt_image = viewpoint_cam.original_image.cuda()
+            sky_image = sky_model.render_with_camera(viewpoint_cam.image_height, viewpoint_cam.image_width, viewpoint_cam.K, viewpoint_cam.c2w)
+            composite_image = render_image + sky_image * (1 - render_pkg["rend_alpha"])
+            Ll1 = l1_loss(composite_image, gt_image)
+            Lssim = ssim(composite_image, gt_image)
 
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        sky_image = sky_model.render_with_camera(viewpoint_cam.image_height, viewpoint_cam.image_width, viewpoint_cam.K, viewpoint_cam.c2w)
-        composite_image = render_image + sky_image * (1 - render_pkg["rend_alpha"])
-        Ll1 = l1_loss(composite_image, gt_image)
-        Lssim = ssim(composite_image, gt_image)
+            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - Lssim)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - Lssim)
+            loss_dict['l1'] = Ll1
+            loss_dict['ssim'] = Lssim
 
-        loss_dict['l1'] = Ll1
-        loss_dict['ssim'] = Lssim
+            lambda_normal = opt.lambda_normal if iteration > opt.normal_consist_from_iter else 0.0
+            rend_dist = render_pkg["rend_dist"]
+            rend_normal = render_pkg['rend_normal']
+            surf_normal = render_pkg['surf_normal']
+            normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+            normal_loss = lambda_normal * (normal_error).mean()
 
-        lambda_normal = opt.lambda_normal if iteration > opt.normal_consist_from_iter else 0.0
-        rend_dist = render_pkg["rend_dist"]
-        rend_normal = render_pkg['rend_normal']
-        surf_normal = render_pkg['surf_normal']
-        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-        normal_loss = lambda_normal * (normal_error).mean()
+            # loss
+            loss += normal_loss
 
-        # loss
-        loss += normal_loss
+            loss_dict['Lnormal'] = normal_loss
 
-        loss_dict['Lnormal'] = normal_loss
+            lambda_dist = opt.lambda_dist if iteration > opt.semantic_dist_from_iter else 0.0
+            dist_loss = lambda_dist * (rend_dist).mean()
+            loss += dist_loss
+            loss_dict['Ldist'] = dist_loss
 
-        lambda_dist = opt.lambda_dist if iteration > opt.semantic_dist_from_iter else 0.0
-        dist_loss = lambda_dist * (rend_dist).mean()
-        loss += dist_loss
-        loss_dict['Ldist'] = dist_loss
+            lambda_shrink = opt.lambda_shrink if iteration > opt.shrinking_from_iter else 0.0
+            shrink_loss = lambda_shrink * gaussians.get_opacity.mean()
+            loss += shrink_loss
+            loss_dict['Lshrink'] = shrink_loss
 
-        lambda_shrink = opt.lambda_shrink if iteration > opt.shrinking_from_iter else 0.0
-        shrink_loss = lambda_shrink * gaussians.get_opacity.mean()
-        loss += shrink_loss
-        loss_dict['Lshrink'] = shrink_loss
+            loss.backward()
 
-        loss.backward()
+            iter_end.record()
 
-        iter_end.record()
+            with torch.no_grad():
+                # Progress bar
+                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+                if iteration % 10 == 0:
+                    bar.text = f"Loss: {ema_loss_for_log:.7f}"
+                    for _ in range(10):
+                        bar()
 
-        with torch.no_grad():
-            # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
-                progress_bar.update(10)
-            if iteration == opt.iterations:
-                progress_bar.close()
+                # Log and save
+                training_report(tb_writer, iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model)
+                if (iteration in saving_iterations):
+                    print("\n[ITER {}] Saving Gaussians".format(iteration))
+                    scene.save(iteration)
 
-            # Log and save
-            training_report(tb_writer, iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+                # Densification
+                if iteration < opt.densify_until_iter:
+                    # Keep track of max radii in image-space for pruning
+                    gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-            # Densification
-            if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        gaussians.reset_opacity()
 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                if (
+                        iteration < opt.prune_until_iter
+                        and iteration > opt.prune_from_iter
+                        and iteration % opt.prune_interval == 0
+                ):
+                    prune_mask = (gaussians.get_opacity < 0.5).squeeze()
 
-            if (
-                    iteration < opt.prune_until_iter
-                    and iteration > opt.prune_from_iter
-                    and iteration % opt.prune_interval == 0
-            ):
-                prune_mask = (gaussians.get_opacity < 0.5).squeeze()
+                    # sky and vegetation may be transparent
+                    sky_bit = 1 << concerned_classes_ind_map["sky"]
+                    vegetation_bit = 1 << concerned_classes_ind_map["vegetation"]
+                    dont_prune_semantic_bit = sky_bit | vegetation_bit
 
-                # sky and vegetation may be transparent
-                sky_bit = 1 << concerned_classes_ind_map["sky"]
-                vegetation_bit = 1 << concerned_classes_ind_map["vegetation"]
-                dont_prune_semantic_bit = sky_bit | vegetation_bit
+                    prune_mask *= ((gaussians.get_semantics_32bit & dont_prune_semantic_bit) == 0)
+                    gaussians.prune_points(prune_mask)
 
-                prune_mask *= ((gaussians.get_semantics_32bit & dont_prune_semantic_bit) == 0)
-                gaussians.prune_points(prune_mask)
+                    torch.cuda.empty_cache()
 
-                torch.cuda.empty_cache()
+                # Optimizer step
+                if iteration < opt.iterations:
+                    gaussians.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none = True)
+                    sky_model.optimizer.step()
+                    sky_model.optimizer.zero_grad()
 
-            # Optimizer step
-            if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
-                sky_model.optimizer.step()
-                sky_model.optimizer.zero_grad()
-
-            if (iteration in checkpoint_iterations):
-                checkpoint_path = os.path.join(scene.model_path, "checkpoint", "iteration_{}".format(iteration))
-                mkdir_p(checkpoint_path)
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), os.path.join(checkpoint_path, "splatting.pt"))
-                sky_model.save(os.path.join(checkpoint_path, "sky_params.pt"))
+                if (iteration in checkpoint_iterations):
+                    checkpoint_path = os.path.join(scene.model_path, "checkpoint", "iteration_{}".format(iteration))
+                    mkdir_p(checkpoint_path)
+                    print("\n[ITER {}] Saving Checkpoint".format(iteration))
+                    torch.save((gaussians.capture(), iteration), os.path.join(checkpoint_path, "splatting.pt"))
+                    sky_model.save(os.path.join(checkpoint_path, "sky_params.pt"))
 
     end_time = time.time()
     elapsed_time = end_time - start_time

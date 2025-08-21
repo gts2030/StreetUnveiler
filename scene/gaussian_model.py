@@ -9,7 +9,7 @@ import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
 import os
-from tqdm import tqdm
+from alive_progress import alive_bar
 from utils.system_utils import mkdir_p
 from plyfile import PlyData, PlyElement
 from utils.sh_utils import RGB2SH, SH2RGB
@@ -590,24 +590,32 @@ class GaussianModel:
 
         if parallel:
             # This is a parallelized pseudo clustering, but not strictly equivalent to non-parallelized version.
-            for i in tqdm(range(active_points_indices.shape[0] - 1)):
-                distance_l2 = (torch.abs(active_points_xyz[i] - active_points_xyz) ** 2).sum(dim=-1) ** 0.5
-                if_connect = distance_l2 < threshold
+            import sys
+            with alive_bar(active_points_indices.shape[0] - 1, title="🔗 Clustering Points (Parallel)", 
+                           bar="smooth", spinner="waves", file=sys.stderr) as bar:
+                for i in range(active_points_indices.shape[0] - 1):
+                    distance_l2 = (torch.abs(active_points_xyz[i] - active_points_xyz) ** 2).sum(dim=-1) ** 0.5
+                    if_connect = distance_l2 < threshold
 
-                connected_indices = active_points_indices[if_connect]
-                grandfather = dset.father[connected_indices].min()
-                dset.father[connected_indices] = grandfather
-                dset.densify()
+                    connected_indices = active_points_indices[if_connect]
+                    grandfather = dset.father[connected_indices].min()
+                    dset.father[connected_indices] = grandfather
+                    dset.densify()
+                    bar()
             dset.densify()
         else:
             print("Warning: using the slow non-parallelized clustering.")
-            for i in tqdm(range(active_points_indices.shape[0]-1)):
-                distance_l2 = (torch.abs(active_points_xyz[i]-active_points_xyz[i+1:])**2).sum(dim=-1)**0.5
-                if_connect = distance_l2 < threshold
+            import sys
+            with alive_bar(active_points_indices.shape[0] - 1, title="🔗 Clustering Points (Serial)", 
+                           bar="smooth", spinner="waves", file=sys.stderr) as bar:
+                for i in range(active_points_indices.shape[0] - 1):
+                    distance_l2 = (torch.abs(active_points_xyz[i]-active_points_xyz[i+1:])**2).sum(dim=-1)**0.5
+                    if_connect = distance_l2 < threshold
 
-                connected_indices = active_points_indices[i+1:][if_connect]
-                for j in connected_indices:
-                    dset.union(active_points_indices[i], j)
+                    connected_indices = active_points_indices[i+1:][if_connect]
+                    for j in connected_indices:
+                        dset.union(active_points_indices[i], j)
+                    bar()
             dset.densify()
 
         self.cluster_idx[active_points_mask] = dset.get_father_with_mask(active_points_mask)
@@ -626,24 +634,32 @@ class GaussianModel:
             active_points_xyz = self._xyz.detach()[valid_mask]
             if parallel:
                 # This is a parallelized pseudo clustering, but not strictly equivalent to non-parallelized version.
-                for i in tqdm(range(active_points_indices.shape[0] - 1)):
-                    distance_l2 = (torch.abs(active_points_xyz[i] - active_points_xyz) ** 2).sum(dim=-1) ** 0.5
-                    if_connect = distance_l2 < threshold
+                import sys
+                with alive_bar(active_points_indices.shape[0] - 1, title="🔗 Instance Clustering (Parallel)", 
+                               bar="smooth", spinner="waves", file=sys.stderr) as bar:
+                    for i in range(active_points_indices.shape[0] - 1):
+                        distance_l2 = (torch.abs(active_points_xyz[i] - active_points_xyz) ** 2).sum(dim=-1) ** 0.5
+                        if_connect = distance_l2 < threshold
 
-                    connected_indices = active_points_indices[if_connect]
-                    grandfather = dset.father[connected_indices].min()
-                    dset.father[connected_indices] = grandfather
-                    dset.densify()
+                        connected_indices = active_points_indices[if_connect]
+                        grandfather = dset.father[connected_indices].min()
+                        dset.father[connected_indices] = grandfather
+                        dset.densify()
+                        bar()
                 dset.densify()
             else:
                 print("Warning: using the slow non-parallelized clustering.")
-                for i in tqdm(range(active_points_indices.shape[0]-1)):
-                    distance_l2 = (torch.abs(active_points_xyz[i]-active_points_xyz[i+1:])**2).sum(dim=-1)**0.5
-                    if_connect = distance_l2 < threshold
+                import sys
+                with alive_bar(active_points_indices.shape[0] - 1, title="🔗 Instance Clustering (Serial)", 
+                               bar="smooth", spinner="waves", file=sys.stderr) as bar:
+                    for i in range(active_points_indices.shape[0] - 1):
+                        distance_l2 = (torch.abs(active_points_xyz[i]-active_points_xyz[i+1:])**2).sum(dim=-1)**0.5
+                        if_connect = distance_l2 < threshold
 
-                    connected_indices = active_points_indices[i+1:][if_connect]
-                    for j in connected_indices:
-                        dset.union(active_points_indices[i], j)
+                        connected_indices = active_points_indices[i+1:][if_connect]
+                        for j in connected_indices:
+                            dset.union(active_points_indices[i], j)
+                        bar()
                 dset.densify()
 
             self.cluster_idx[valid_mask] = dset.get_father_with_mask(valid_mask)

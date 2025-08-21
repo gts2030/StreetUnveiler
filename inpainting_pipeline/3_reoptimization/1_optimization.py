@@ -15,7 +15,7 @@ import os
 from os import makedirs
 from random import randint
 from PIL import Image
-from tqdm import tqdm
+from alive_progress import alive_bar
 from argparse import ArgumentParser, Namespace
 import numpy as np
 import torch
@@ -201,7 +201,7 @@ def refine(
 
         # Some reoptimization
         ema_loss_for_log = 0.0
-        progress_bar = tqdm(range(0, opt.iterations), desc="Refining progress")
+        total_iterations = opt.iterations
 
         viewpoint_stack = None
         candidate_frames += [(i + j) for j in range(forward_inpaint_frames_num + 1)]
@@ -209,72 +209,73 @@ def refine(
         for frame_id in candidate_frames:
             candidate_mask_dict[frame_id] = masks_torch_list[frame_id]
 
-        for iteration in range(1, opt.iterations + 1):
-            gaussians.update_learning_rate(iteration)
+        import sys
+        with alive_bar(total_iterations, title="🔧 Refining StreetUnveiler", bar="smooth", spinner="waves", file=sys.stderr) as bar:
+            for iteration in range(1, opt.iterations + 1):
+                gaussians.update_learning_rate(iteration)
 
-            if not viewpoint_stack:
-                viewpoint_stack = candidate_frames.copy()
+                if not viewpoint_stack:
+                    viewpoint_stack = candidate_frames.copy()
 
-            select_frame_id = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
-            viewpoint_cam = scene.getTrainCameras()[select_frame_id]
+                select_frame_id = viewpoint_stack.pop(randint(0, len(viewpoint_stack) - 1))
+                viewpoint_cam = scene.getTrainCameras()[select_frame_id]
 
-            sky_image = sky_model.render_with_camera(viewpoint_cam.image_height, viewpoint_cam.image_width, viewpoint_cam.K, viewpoint_cam.c2w)
-            render_pkg = render(viewpoint_cam, gaussians, pipeline, background)
-            original_alpha = render_pkg['rend_alpha']
-            render_image, render_depth = render_pkg["render"], render_pkg["surf_depth"]
-            render_image = render_image + sky_image * (1 - original_alpha)
+                sky_image = sky_model.render_with_camera(viewpoint_cam.image_height, viewpoint_cam.image_width, viewpoint_cam.K, viewpoint_cam.c2w)
+                render_pkg = render(viewpoint_cam, gaussians, pipeline, background)
+                original_alpha = render_pkg['rend_alpha']
+                render_image, render_depth = render_pkg["render"], render_pkg["surf_depth"]
+                render_image = render_image + sky_image * (1 - original_alpha)
 
-            loss_dict = {}
+                loss_dict = {}
 
-            current_supervision_rgb = inpainted_rgb_dict[select_frame_id]
-            masked_render_image = torch.where(
-                candidate_mask_dict[select_frame_id],
-                render_image, torch.zeros_like(render_image).cuda()
-            )
-            masked_inpainted_image = torch.where(
-                candidate_mask_dict[select_frame_id],
-                current_supervision_rgb, torch.zeros_like(current_supervision_rgb).cuda()
-            )
+                current_supervision_rgb = inpainted_rgb_dict[select_frame_id]
+                masked_render_image = torch.where(
+                    candidate_mask_dict[select_frame_id],
+                    render_image, torch.zeros_like(render_image).cuda()
+                )
+                masked_inpainted_image = torch.where(
+                    candidate_mask_dict[select_frame_id],
+                    current_supervision_rgb, torch.zeros_like(current_supervision_rgb).cuda()
+                )
 
-            unmasked_render_image = torch.where(
-                ~candidate_mask_dict[select_frame_id],
-                render_image, torch.zeros_like(render_image).cuda()
-            )
-            unmasked_gt_image = torch.where(
-                ~candidate_mask_dict[select_frame_id],
-                rgb_tensors[select_frame_id], torch.zeros_like(current_supervision_rgb).cuda()
-            )
+                unmasked_render_image = torch.where(
+                    ~candidate_mask_dict[select_frame_id],
+                    render_image, torch.zeros_like(render_image).cuda()
+                )
+                unmasked_gt_image = torch.where(
+                    ~candidate_mask_dict[select_frame_id],
+                    rgb_tensors[select_frame_id], torch.zeros_like(current_supervision_rgb).cuda()
+                )
 
-            Ll1 = l1_loss(masked_render_image, masked_inpainted_image) + l1_loss(unmasked_render_image, unmasked_gt_image)
-            Ldist = opt.lambda_dist * render_pkg["rend_dist"].mean()
-            rend_normal = render_pkg['rend_normal']
-            surf_normal = render_pkg['surf_normal']
-            normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-            Lnormal = opt.lambda_normal * (normal_error).mean()
+                Ll1 = l1_loss(masked_render_image, masked_inpainted_image) + l1_loss(unmasked_render_image, unmasked_gt_image)
+                Ldist = opt.lambda_dist * render_pkg["rend_dist"].mean()
+                rend_normal = render_pkg['rend_normal']
+                surf_normal = render_pkg['surf_normal']
+                normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+                Lnormal = opt.lambda_normal * (normal_error).mean()
 
 
-            loss = Ll1 + Ldist + Lnormal
-            loss_dict['l1'] = Ll1
-            loss_dict['ldist'] = Ldist
-            loss_dict['lnormal'] = Lnormal
+                loss = Ll1 + Ldist + Lnormal
+                loss_dict['l1'] = Ll1
+                loss_dict['ldist'] = Ldist
+                loss_dict['lnormal'] = Lnormal
 
-            loss.backward()
+                loss.backward()
 
-            with torch.no_grad():
-                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-                if iteration % 10 == 0:
-                    progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
-                    progress_bar.update(10)
-                if iteration == opt.iterations:
-                    progress_bar.close()
+                with torch.no_grad():
+                    ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+                    if iteration % 10 == 0:
+                        bar.text = f"Loss: {ema_loss_for_log:.7f}"
+                        for _ in range(10):
+                            bar()
 
-                training_report(tb_writer, opt.iterations * count + iteration, loss_dict, testing_iterations, scene,
-                                gaussians, render, (pipeline, background), sky_model)
+                    training_report(tb_writer, opt.iterations * count + iteration, loss_dict, testing_iterations, scene,
+                                    gaussians, render, (pipeline, background), sky_model)
 
-                # Optimizer step
-                if iteration < opt.iterations:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none=True)
+                    # Optimizer step
+                    if iteration < opt.iterations:
+                        gaussians.optimizer.step()
+                        gaussians.optimizer.zero_grad(set_to_none=True)
 
         count += 1
 

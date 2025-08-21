@@ -16,7 +16,7 @@ import numpy as np
 import torch.nn.functional as FF
 import torchvision.transforms.functional as F
 import torch.nn.parallel
-from tqdm import tqdm
+from alive_progress import alive_bar
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../3rd_party/ZITS-PlusPlus')))
 

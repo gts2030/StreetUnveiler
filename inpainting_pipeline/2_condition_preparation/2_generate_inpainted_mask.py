@@ -15,7 +15,7 @@ import numpy as np
 import torch
 import torchvision
 from os import makedirs
-from tqdm import tqdm
+from alive_progress import alive_bar
 from argparse import ArgumentParser
 from enum import Enum
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -106,56 +106,60 @@ def render_set(model_path, views, gaussians, pipeline, background, removed_pcd_m
     makedirs(empty_opacity_path, exist_ok=True)
 
     valid_frame_list = []
-    for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        sky_image = sky_model.render_with_camera(view.image_height, view.image_width, view.K, view.c2w)
-        render_pkg = render(view, gaussians, pipeline, background)
-        rendered_alpha = render_pkg["rend_alpha"]
-        original_rgb = render_pkg['render'] + sky_image * (1 - rendered_alpha)
-        torchvision.utils.save_image(original_rgb, os.path.join(original_rgb_path, '{0:05d}'.format(idx) + ".png"))
+    import sys
+    with alive_bar(len(views), title="🎨 Rendering Progress", 
+                   bar="smooth", spinner="waves", file=sys.stderr) as bar:
+        for idx, view in enumerate(views):
+            sky_image = sky_model.render_with_camera(view.image_height, view.image_width, view.K, view.c2w)
+            render_pkg = render(view, gaussians, pipeline, background)
+            rendered_alpha = render_pkg["rend_alpha"]
+            original_rgb = render_pkg['render'] + sky_image * (1 - rendered_alpha)
+            torchvision.utils.save_image(original_rgb, os.path.join(original_rgb_path, '{0:05d}'.format(idx) + ".png"))
 
-        bg_render_pkg = render_with_mask(view, gaussians, pipeline, background, ~removed_pcd_mask)
-        background_rgb = bg_render_pkg['render'] + sky_image * (1 - rendered_alpha)
+            bg_render_pkg = render_with_mask(view, gaussians, pipeline, background, ~removed_pcd_mask)
+            background_rgb = bg_render_pkg['render'] + sky_image * (1 - rendered_alpha)
 
-        removed_rendered_alpha = bg_render_pkg["rend_alpha"]
+            removed_rendered_alpha = bg_render_pkg["rend_alpha"]
 
-        torchvision.utils.save_image(rendered_alpha - removed_rendered_alpha, os.path.join(empty_opacity_path, '{0:05d}'.format(idx) + ".png"))
+            torchvision.utils.save_image(rendered_alpha - removed_rendered_alpha, os.path.join(empty_opacity_path, '{0:05d}'.format(idx) + ".png"))
 
-        depth = None
-        if inpainted_rgb_type == InpaintRGBType.GT or inpainted_rgb_type == InpaintRGBType.RENDER:
-            depth = render_pkg['surf_depth']
-        elif inpainted_rgb_type == InpaintRGBType.RENDER_WO_INSTANCE:
-            depth = bg_render_pkg['surf_depth']
-        assert depth is not None
+            depth = None
+            if inpainted_rgb_type == InpaintRGBType.GT or inpainted_rgb_type == InpaintRGBType.RENDER:
+                depth = render_pkg['surf_depth']
+            elif inpainted_rgb_type == InpaintRGBType.RENDER_WO_INSTANCE:
+                depth = bg_render_pkg['surf_depth']
+            assert depth is not None
 
-        threshold = 0.01
-        instance_pix_mask = (torch.abs(rendered_alpha - removed_rendered_alpha) > threshold).sum(0)
+            threshold = 0.01
+            instance_pix_mask = (torch.abs(rendered_alpha - removed_rendered_alpha) > threshold).sum(0)
 
-        valid_frame_list.append(idx)
-        instance_pix_mask = dilate_mask(instance_pix_mask, 5).cpu()
-        torchvision.utils.save_image(instance_pix_mask.float(), os.path.join(mask_path, '{0:05d}'.format(idx) + ".png"))
-        np.save(os.path.join(mask_path, '{0:05d}'.format(idx) + ".npy"), instance_pix_mask.numpy())
+            valid_frame_list.append(idx)
+            instance_pix_mask = dilate_mask(instance_pix_mask, 5).cpu()
+            torchvision.utils.save_image(instance_pix_mask.float(), os.path.join(mask_path, '{0:05d}'.format(idx) + ".png"))
+            np.save(os.path.join(mask_path, '{0:05d}'.format(idx) + ".npy"), instance_pix_mask.numpy())
 
-        raw_disparity = (1.0 / depth)
-        raw_disparity[raw_disparity.isinf()] = 0.0
-        disparity = torch.clamp(raw_disparity, 0.0, 1.0)
-        torchvision.utils.save_image(disparity, os.path.join(inpainted_depth_path, '{0:05d}'.format(idx) + ".png"))
+            raw_disparity = (1.0 / depth)
+            raw_disparity[raw_disparity.isinf()] = 0.0
+            disparity = torch.clamp(raw_disparity, 0.0, 1.0)
+            torchvision.utils.save_image(disparity, os.path.join(inpainted_depth_path, '{0:05d}'.format(idx) + ".png"))
 
-        if inpainted_rgb_type == InpaintRGBType.GT:
-            torchvision.utils.save_image(view.original_image, os.path.join(inpainted_rgb_path, '{0:05d}'.format(idx) + ".png"))
-        elif inpainted_rgb_type == InpaintRGBType.RENDER:
-            torchvision.utils.save_image(original_rgb, os.path.join(inpainted_rgb_path, '{0:05d}'.format(idx) + ".png"))
-        elif inpainted_rgb_type == InpaintRGBType.RENDER_WO_INSTANCE:
-            torchvision.utils.save_image(background_rgb, os.path.join(inpainted_rgb_path, '{0:05d}'.format(idx) + ".png"))
+            if inpainted_rgb_type == InpaintRGBType.GT:
+                torchvision.utils.save_image(view.original_image, os.path.join(inpainted_rgb_path, '{0:05d}'.format(idx) + ".png"))
+            elif inpainted_rgb_type == InpaintRGBType.RENDER:
+                torchvision.utils.save_image(original_rgb, os.path.join(inpainted_rgb_path, '{0:05d}'.format(idx) + ".png"))
+            elif inpainted_rgb_type == InpaintRGBType.RENDER_WO_INSTANCE:
+                torchvision.utils.save_image(background_rgb, os.path.join(inpainted_rgb_path, '{0:05d}'.format(idx) + ".png"))
 
-        normal = None
-        if inpainted_rgb_type == InpaintRGBType.GT or inpainted_rgb_type == InpaintRGBType.RENDER:
-            normal = render_pkg['rend_normal']
-        elif inpainted_rgb_type == InpaintRGBType.RENDER_WO_INSTANCE:
-            normal = bg_render_pkg['rend_normal']
-        assert normal is not None
+            normal = None
+            if inpainted_rgb_type == InpaintRGBType.GT or inpainted_rgb_type == InpaintRGBType.RENDER:
+                normal = render_pkg['rend_normal']
+            elif inpainted_rgb_type == InpaintRGBType.RENDER_WO_INSTANCE:
+                normal = bg_render_pkg['rend_normal']
+            assert normal is not None
 
-        normal = torch.clamp(normal * 0.5 + 0.5, 0.0, 1.0)
-        torchvision.utils.save_image(normal, os.path.join(inpainted_normal_path, '{0:05d}'.format(idx) + ".png"))
+            normal = torch.clamp(normal * 0.5 + 0.5, 0.0, 1.0)
+            torchvision.utils.save_image(normal, os.path.join(inpainted_normal_path, '{0:05d}'.format(idx) + ".png"))
+            bar()
 
     valid_frame_list = np.array(valid_frame_list)
     np.save(os.path.join(current_inpaint_workspace, 'valid_inpaint_frame.npy'), valid_frame_list)

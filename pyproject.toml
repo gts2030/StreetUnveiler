@@ -36,7 +36,7 @@ dependencies = [
     "tensorboardX",
     "tensorboard",
     "pytorch_lightning>=1.5.0",
-    "tqdm",
+    "alive-progress>=3.3.0",
     # Evaluation metrics
     "pytorch-fid",
     "lpips",
@@ -51,11 +51,10 @@ dependencies = [
     # Dataset specific
     "nuscenes-devkit",
     "pykitti",
-    
     # Local submodules (installed separately with --no-build-isolation)
     # Note: These are installed manually due to build dependencies on PyTorch
     # "superpose3d @ file://submodules/superpose3d",
-    # "sh-encoder @ file://submodules/sh_encoder", 
+    # "sh-encoder @ file://submodules/sh_encoder",
     # "simple-knn @ file://submodules/simple-knn",
     # "diff-surfel-rasterization @ file://submodules/diff-surfel-rasterization",
     # "tinycudann @ file://submodules/tiny-cuda-nn/bindings/torch",
