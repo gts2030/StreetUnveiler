@@ -3,3 +3,9 @@
 __pycache__
 output*
 .vscode
+
+# Secrets and API keys
+secrets/
+*.key
+*.secret
+**/wandb_api_key.txt
