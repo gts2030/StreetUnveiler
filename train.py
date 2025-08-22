@@ -23,16 +23,18 @@ from utils.image_utils import psnr
 from utils.semantic_utils import concerned_classes_ind_map, concerned_classes_list, semantic_prob_to_rgb
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
-try:
-    from torch.utils.tensorboard import SummaryWriter
-    TENSORBOARD_FOUND = True
-except ImportError:
-    TENSORBOARD_FOUND = False
+from utils.wandb_utils import prepare_output_and_wandb, init_wandb, log_scalar, log_image, log_histogram, log_metrics, finish_wandb, is_wandb_available
+
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, continue_model_path, start_iteration, debug_from):
     start_time = time.time()
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+
+    # Initialize W&B logging
+    wandb_enabled = prepare_output_and_wandb(dataset)
+    if not wandb_enabled:
+        print("W&B logging failed to initialize. Continuing without logging.")
+
     gaussians = GaussianModel(dataset.sh_degree)
     sky_model = SkyModel()
     if continue_model_path:
