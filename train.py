@@ -25,6 +25,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.wandb_utils import prepare_output_and_wandb, init_wandb, log_scalar, log_image, log_histogram, log_metrics, finish_wandb, is_wandb_available
 from utils.mono_priors.metric_depth_estimators import compute_metric_depth, get_metric_depth_estimator
+from utils.mono_priors.img_feature_extractors import get_feature_extractor, predict_img_features
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, continue_model_path, start_iteration, debug_from):
@@ -40,7 +41,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     sky_model = SkyModel()
     
     # Initialize depth estimator once for efficiency
-    depth_estimator = get_metric_depth_estimator(dataset=dataset)
+    depth_estimator = get_metric_depth_estimator(dataset)
+    
+    # Initialize DINO feature extractor once for efficiency
+    feature_extractor = get_feature_extractor(dataset)
     
     if continue_model_path:
         scene = Scene(dataset, gaussians, sky_model, load_iteration=start_iteration)
@@ -67,7 +71,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_iter += 1
     gaussians.prune_semantic_splatting(1 << concerned_classes_ind_map['sky'])
     
-    import sys
     with alive_bar(total_iterations, title="🚀 Training Dynamic StreetUnveiler", bar="smooth", spinner="waves", file=sys.stderr) as bar:
         for iteration in range(first_iter, opt.iterations + 1):
             iter_start.record()
@@ -176,7 +179,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         bar()
 
                 # Log and save
-                training_report(iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model, dataset, depth_estimator)
+                training_report(iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model, dataset, depth_estimator, feature_extractor)
                 if (iteration in saving_iterations):
                     print("\n[ITER {}] Saving Gaussians".format(iteration))
                     scene.save(iteration)
@@ -247,7 +250,7 @@ def prepare_output_and_logger(args):
     # W&B logging is handled by wandb_utils
     return None
 
-def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, sky_model, dataset=None, depth_estimator=None):
+def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, sky_model, dataset=None, depth_estimator=None, feature_extractor=None):
     # Log metrics to W&B
     if is_wandb_available():
         metrics = {}

@@ -64,12 +64,25 @@ Done with overwriting get_intermediate_layers of FiT3D model
 """
 
 
-def get_feature_extractor(cfg: Dict) -> nn.Module:
+def get_feature_extractor(dataset=None) -> nn.Module:
     """
     Get the feature extractor model based on the configuration.
+    
+    Args:
+        dataset: Dataset object containing configuration (preferred)
     """
-    device = cfg["device"]
-    extractor_model = cfg["mono_prior"]["feature_extractor"]
+    # Extract config from dataset if provided
+    if dataset is not None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Check if dataset has feature_extractor attribute, otherwise use default
+        if hasattr(dataset, 'feature_extractor'):
+            extractor_model = dataset.feature_extractor
+        else:
+            # Default to dinov2_vits14 for DINO features
+            extractor_model = 'dinov2_reg_small_fine'
+            print(f"Dataset does not have feature_extractor attribute, using default: {extractor_model}")
+    else:
+        raise ValueError("Dataset must be provided")
 
     if extractor_model in ["dinov2_reg_small_fine", "dinov2_small_fine"]:
         return Fit3DModels(extractor_model, device)
