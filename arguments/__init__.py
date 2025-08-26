@@ -52,6 +52,9 @@ class ModelParams(ParamGroup):
         self._white_background = False
         self.data_device = "cuda"
         self.eval = False
+        # Mono prior configuration
+        self.mono_prior_feature_extractor = "dinov2_reg_small_fine"
+        self.mono_prior_depth = "metric3d_vit_large"
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

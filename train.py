@@ -24,6 +24,7 @@ from utils.semantic_utils import concerned_classes_ind_map, concerned_classes_li
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from utils.wandb_utils import prepare_output_and_wandb, init_wandb, log_scalar, log_image, log_histogram, log_metrics, finish_wandb, is_wandb_available
+from utils.mono_priors.metric_depth_estimators import compute_metric_depth, get_metric_depth_estimator
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, continue_model_path, start_iteration, debug_from):
@@ -37,6 +38,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     gaussians = GaussianModel(dataset.sh_degree)
     sky_model = SkyModel()
+    
+    # Initialize depth estimator once for efficiency
+    depth_estimator = get_metric_depth_estimator(dataset=dataset)
+    
     if continue_model_path:
         scene = Scene(dataset, gaussians, sky_model, load_iteration=start_iteration)
     else:
@@ -119,6 +124,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             composite_image = render_image + sky_image * (1 - render_pkg["rend_alpha"])
             Ll1 = l1_loss(composite_image, gt_image)
             Lssim = ssim(composite_image, gt_image)
+            
+            # Example: Compute metric depth for current viewpoint (if needed for depth supervision)
+            # metric_depth = compute_metric_depth(
+            #     depth_estimator=depth_estimator,
+            #     frame_id=iteration,
+            #     image_input=gt_image,
+            #     feature_cfg={},
+            #     rendered_depth=render_pkg.get("surf_depth"),
+            #     viewpoint_cam=viewpoint_cam,
+            #     dataset=dataset
+            # )
 
             loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - Lssim)
 
@@ -160,7 +176,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         bar()
 
                 # Log and save
-                training_report(tb_writer, iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model)
+                training_report(iteration, loss_dict, loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), sky_model, dataset, depth_estimator)
                 if (iteration in saving_iterations):
                     print("\n[ITER {}] Saving Gaussians".format(iteration))
                     scene.save(iteration)
@@ -228,20 +244,18 @@ def prepare_output_and_logger(args):
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
-    else:
-        print("Tensorboard not available: not logging progress")
-    return tb_writer
+    # W&B logging is handled by wandb_utils
+    return None
 
-def training_report(tb_writer, iteration, loss_dict, loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, sky_model):
-    if tb_writer:
+def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, sky_model, dataset=None, depth_estimator=None):
+    # Log metrics to W&B
+    if is_wandb_available():
+        metrics = {}
         for key, value in loss_dict.items():
-            tb_writer.add_scalar('train_loss_patches/{}_loss'.format(key), value.item(), iteration)
-        tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
-        tb_writer.add_scalar('iter_time', elapsed, iteration)
+            metrics[f'train_loss_patches/{key}_loss'] = value.item()
+        metrics['train_loss_patches/total_loss'] = loss.item()
+        metrics['iter_time'] = elapsed
+        log_metrics(metrics, step=iteration)
 
     # Report test and samples of training set
     if iteration in testing_iterations:
@@ -261,46 +275,75 @@ def training_report(tb_writer, iteration, loss_dict, loss, elapsed, testing_iter
                     image = torch.clamp(render_pkg["render"] + (1.0 - render_pkg['rend_alpha']) * env_image, 0.0, 1.0)
                     disparity = torch.clamp((1.0 / render_pkg["surf_depth"]).nan_to_num(), 0.0, 1.0)
                     gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    if tb_writer and (idx < 8):
-                        tb_writer.add_images(config['name'] + "_view_{}/sky".format(viewpoint.image_name), env_image[None], global_step=iteration)
+                    
+                    # Compute metric depth for validation
+                    rendered_metric_depth = compute_metric_depth(
+                        depth_estimator=depth_estimator,
+                        frame_id=select_frame_id,
+                        image_input=image,
+                        feature_cfg={},
+                        rendered_depth=render_pkg.get("surf_depth"),
+                        viewpoint_cam=viewpoint,
+                        dataset=dataset
+                    )
+
+                    gt_metric_depth = compute_metric_depth(
+                        depth_estimator=depth_estimator,
+                        frame_id=select_frame_id,
+                        image_input=gt_image,
+                        feature_cfg={},
+                        rendered_depth=render_pkg.get("surf_depth"),
+                        viewpoint_cam=viewpoint,
+                        dataset=dataset
+                    )
+                    
+                    if is_wandb_available() and (idx < 8):
                         from utils.general_utils import colormap
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
-                        tb_writer.add_images(config['name'] + "_view_{}/disparity".format(viewpoint.image_name), disparity[None], global_step=iteration)
+                        log_image(config['name'] + "_view_{}/sky".format(viewpoint.image_name), env_image, step=iteration)
+                        log_image(config['name'] + "_view_{}/render".format(viewpoint.image_name), image, step=iteration)
+                        log_image(config['name'] + "_view_{}/disparity".format(viewpoint.image_name), disparity, step=iteration)
+                        
                         rend_alpha = render_pkg['rend_alpha']
                         rend_normal = render_pkg["rend_normal"] * 0.5 + 0.5
                         surf_normal = render_pkg["surf_normal"] * 0.5 + 0.5
-                        tb_writer.add_images(config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name),
-                                             rend_normal[None], global_step=iteration)
-                        tb_writer.add_images(config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name),
-                                             surf_normal[None], global_step=iteration)
-                        tb_writer.add_images(config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name),
-                                             rend_alpha[None], global_step=iteration)
+                        log_image(config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name), rend_normal, step=iteration)
+                        log_image(config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name), surf_normal, step=iteration)
+                        log_image(config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name), rend_alpha, step=iteration)
 
                         rend_dist = render_pkg["rend_dist"]
                         rend_dist = colormap(rend_dist.cpu().numpy()[0])
-                        tb_writer.add_images(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name),
-                                             rend_dist[None], global_step=iteration)
+                        log_image(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist, step=iteration)
 
                         semantic_pkg = render_semantic(viewpoint, scene.gaussians, *renderArgs)
-                        tb_writer.add_images(config['name'] + "_view_{}/rend_semantic".format(viewpoint.image_name),
-                                             semantic_pkg['semantic_rgb'][None], global_step=iteration)
+                        log_image(config['name'] + "_view_{}/rend_semantic".format(viewpoint.image_name), semantic_pkg['semantic_rgb'], step=iteration)
+
+                        # Log metric depth images with colormap
+                        if rendered_metric_depth is not None:
+                            # Apply colormap like rend_dist for better visualization
+                            rendered_depth_colormap = colormap(rendered_metric_depth.cpu().numpy())
+                            log_image(config['name'] + "_view_{}/rendered_metric_depth".format(viewpoint.image_name), rendered_depth_colormap, step=iteration)
+                        
+                        if gt_metric_depth is not None:
+                            # Apply colormap like rend_dist for better visualization
+                            gt_depth_colormap = colormap(gt_metric_depth.cpu().numpy())
+                            log_image(config['name'] + "_view_{}/gt_metric_depth".format(viewpoint.image_name), gt_depth_colormap, step=iteration)
 
                         if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/semantic_gt".format(viewpoint.image_name), semantic_prob_to_rgb(viewpoint.get_semantic_prob_image())[None] / 255., global_step=iteration)
+                            log_image(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image, step=iteration)
+                            log_image(config['name'] + "_view_{}/semantic_gt".format(viewpoint.image_name), semantic_prob_to_rgb(viewpoint.get_semantic_prob_image()) / 255., step=iteration)
 
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
                 psnr_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])          
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
-                if tb_writer:
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
-                    tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+                if is_wandb_available():
+                    log_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, step=iteration)
+                    log_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, step=iteration)
 
-        if tb_writer:
-            tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
-            tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
+        if is_wandb_available():
+            log_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, step=iteration)
+            log_scalar('total_points', scene.gaussians.get_xyz.shape[0], step=iteration)
         torch.cuda.empty_cache()
 
 if __name__ == "__main__":
