@@ -64,6 +64,32 @@ Done with overwriting get_intermediate_layers of FiT3D model
 """
 
 
+def _get_extractor_model_from_dataset(dataset) -> str:
+    """
+    Extract feature extractor model name from dataset configuration.
+    
+    Args:
+        dataset: Dataset object containing configuration
+        
+    Returns:
+        str: Feature extractor model name
+        
+    Raises:
+        ValueError: If dataset is None
+    """
+    if dataset is not None:
+        # Check if dataset has feature_extractor attribute, otherwise use default
+        if hasattr(dataset, 'mono_prior_feature_extractor'):
+            extractor_model = dataset.mono_prior_feature_extractor
+        else:
+            # Default to dinov2_vits14 for DINO features
+            extractor_model = 'dinov2_reg_small_fine'
+            print(f"Dataset does not have mono_prior_feature_extractor attribute, using default: {extractor_model}")
+        return extractor_model
+    else:
+        raise ValueError("Dataset must be provided")
+
+
 def get_feature_extractor(dataset=None) -> nn.Module:
     """
     Get the feature extractor model based on the configuration.
@@ -71,18 +97,8 @@ def get_feature_extractor(dataset=None) -> nn.Module:
     Args:
         dataset: Dataset object containing configuration (preferred)
     """
-    # Extract config from dataset if provided
-    if dataset is not None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Check if dataset has feature_extractor attribute, otherwise use default
-        if hasattr(dataset, 'feature_extractor'):
-            extractor_model = dataset.feature_extractor
-        else:
-            # Default to dinov2_vits14 for DINO features
-            extractor_model = 'dinov2_reg_small_fine'
-            print(f"Dataset does not have feature_extractor attribute, using default: {extractor_model}")
-    else:
-        raise ValueError("Dataset must be provided")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    extractor_model = _get_extractor_model_from_dataset(dataset)
 
     if extractor_model in ["dinov2_reg_small_fine", "dinov2_small_fine"]:
         return Fit3DModels(extractor_model, device)
@@ -100,8 +116,7 @@ def predict_img_features(
     model: nn.Module,
     idx: int,
     input_tensor: torch.Tensor,
-    cfg: Dict,
-    device: str,
+    dataset=None,
     save_feat: bool = True,
     suffix: str = "",
 ) -> torch.Tensor:
@@ -112,15 +127,16 @@ def predict_img_features(
         model (nn.Module): The feature extractor model.
         idx (int): Image index.
         input_tensor (torch.Tensor): Input image tensor of shape (1, 3, H, W).
-        cfg (Dict): Configuration dictionary.
-        device (str): Device to run the model on.
+        dataset (Dataset): Dataset object containing configuration (preferred)
         save_feat (bool): Whether to save the features.
         suffix (str): Suffix for the output file name.
 
     Returns:
         torch.Tensor: Extracted features.
     """
-    extractor_model = cfg["mono_prior"]["feature_extractor"]
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    extractor_model = _get_extractor_model_from_dataset(dataset)
+    
     stride = 14
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]

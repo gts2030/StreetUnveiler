@@ -82,9 +82,12 @@ class OptimizationParams(ParamGroup):
         self.scaling_lr = 0.001
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
+        self.lambda_rgb_l1 = 0.5
+        self.lambda_depth_l1 = 0.5
         self.lambda_dssim = 0.2
         self.lambda_dist = 100.0
         self.lambda_normal = 0.05
+        self.lambda_dino_reg = 0.01
         self.opacity_cull = 0.005
 
         self.enable_semantic_loss = True
@@ -106,6 +109,20 @@ class OptimizationParams(ParamGroup):
 
         self.shrinking_from_iter = 31_000
         self.lambda_shrink = 0.001
+
+        self.lambda_depth = 0.2
+        self.lambda_var_reg = 0.25
+        self.opacity_th_for_uncer_loss = 0.9
+
+        self.uncertainty_enabled = True
+        self.uncertainty_input_features = 384
+        self.uncertainty_lr = 4e-4
+        self.uncertainty_weight_decay = 1e-5
+        self.uncertainty_hidden_dim = 64
+        self.uncertainty_net_depth = 2
+
+        self.ssim_median_filter_size = 5
+        self.ssim_window_size = 7
 
         if parser is not None:
             super().__init__(parser, "MaskOptimization Parameters")
