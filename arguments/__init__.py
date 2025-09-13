@@ -82,15 +82,15 @@ class OptimizationParams(ParamGroup):
         self.scaling_lr = 0.001
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
-        self.lambda_rgb_l1 = 0.5
-        self.lambda_depth_l1 = 0.5
+        self.lambda_rgb_l1 = 0.7
+        self.lambda_depth_l1 = 0.3
         self.lambda_dssim = 0.2
         self.lambda_dist = 100.0
         self.lambda_normal = 0.05
         self.lambda_dino_reg = 0.01
         self.opacity_cull = 0.005
 
-        self.enable_semantic_loss = True
+        self.enable_semantic_loss = False
         self.semantic_loss_ratio = 0.1
 
         self.densification_interval = 500

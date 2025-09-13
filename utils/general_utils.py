@@ -170,3 +170,20 @@ def colormap(img, cmap='jet'):
     img = torch.from_numpy(data / 255.).float().permute(2,0,1)
     plt.close()
     return img
+
+def colormap_no_bar(img, cmap='jet'):
+    """Colormap function without colorbar for cleaner wandb logging"""
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    import numpy as np
+    
+    # Normalize the image to [0, 1]
+    img_norm = (img - img.min()) / (img.max() - img.min() + 1e-8)
+    
+    # Apply colormap directly
+    cmap_func = cm.get_cmap(cmap)
+    colored = cmap_func(img_norm)[:, :, :3]  # Drop alpha channel
+    
+    # Convert to torch tensor in CHW format
+    img_tensor = torch.from_numpy(colored).float().permute(2, 0, 1)
+    return img_tensor

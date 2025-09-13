@@ -265,7 +265,8 @@ def compute_mapping_loss_components(
     _, h, w = gt_img.shape
 
     # Compute RGB L1 loss with masking
-    rgb_l1_loss = torch.abs(rendered_img * mask - gt_img * mask)
+    # rgb_l1_loss = torch.abs(rendered_img * mask - gt_img * mask)
+    rgb_l1_loss = torch.abs(rendered_img - gt_img)
 
     # Compute depth loss with adaptive thresholding
     median_depth = ref_depth.median()
@@ -359,8 +360,9 @@ def compute_mapping_loss_components(
     # Compute final uncertainty loss (DINO term은 min으로 억제)
     uncertainty_loss = (
         torch.min(filtered_ssim_loss, small_dino_loss) / (processed_uncertainty ** 2)
-        + lambda_depth * small_depth_loss / (processed_uncertainty ** 2)
-        + lambda_var_reg * torch.log(processed_uncertainty.clamp_min(1e-8))
+        # small_dino_loss / (processed_uncertainty ** 2)
+        # + lambda_depth * small_depth_loss / (processed_uncertainty ** 2)
+        + lambda_var_reg * torch.log(processed_uncertainty)
     )
 
     uncertainty_loss[

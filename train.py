@@ -60,6 +60,40 @@ def _precompute_gt_depths(scene, depth_estimator, dataset):
     
     print(f"✅ precomputed GT depths: {len(scene.computed_gt_depths)}")
 
+# ---- beta warm-up & ramp schedule helpers ----
+def _smoothstep01(x: torch.Tensor) -> torch.Tensor:
+    # x in [0,1]  -> smooth 0..1
+    return x * x * (3.0 - 2.0 * x)
+
+def beta_schedule_factor(iter_idx: int, opt) -> float:
+    """
+    Return s in [0..1]; 0 before warmup, smoothly ramps to 1 after warmup+ramp.
+    """
+    w = getattr(opt, "beta_warmup_iters", 10000)   # warm-up length
+    r = getattr(opt, "beta_ramp_iters", 5000)      # ramp length after warm-up
+    if iter_idx < w: 
+        return 0.0
+    if r <= 0:
+        return 1.0
+    x = float(iter_idx - w) / float(r)
+    if x >= 1.0:
+        return 1.0
+    # smoothstep
+    return float(_smoothstep01(torch.tensor(x)).item())
+
+def mix_beta_for_render(beta_resized: torch.Tensor, s: float, opt) -> torch.Tensor:
+    """
+    s in [0..1].  beta_for_render^2 = (1-s)*beta_const^2 + s*beta_resized^2
+    -> before warmup (s=0): constant beta_const
+       after ramp (s=1):    predicted beta_resized
+       mid: smooth blend
+    """
+    beta_const = getattr(opt, "beta_const_for_warmup", 1.0)
+    # safety clamp in case upstream forgot
+    beta_resized = beta_resized.clamp_min(1e-3)
+    beta2 = (beta_resized ** 2)
+    return torch.sqrt((1.0 - s) * (beta_const ** 2) + s * beta2)
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, continue_model_path, start_iteration, debug_from):
     start_time = time.time()
     first_iter = 0
@@ -100,7 +134,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     viewpoint_stack = None
     opt.densification_interval = int(len(scene.getTrainCameras()) * 1.15)
-    print(opt.densification_interval)
+    print("Densification interval: ", opt.densification_interval)
     ema_loss_for_log = 0.0
     total_iterations = opt.iterations - first_iter
     first_iter += 1
@@ -161,7 +195,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Loss
             gt_image = viewpoint_cam.original_image.cuda()
-            gt_metric_depth = scene.computed_gt_depths.get(viewpoint_cam.uid)  
+            gt_metric_depth = scene.computed_gt_depths.get(select_frame_id)  
             sky_image = sky_model.render_with_camera(viewpoint_cam.image_height, viewpoint_cam.image_width, viewpoint_cam.K, viewpoint_cam.c2w)
             composite_image = render_image + sky_image * (1 - opacity)
             Ll1 = l1_loss(composite_image, gt_image)
@@ -169,10 +203,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             rendered_metric_depth = compute_metric_depth(
                 depth_estimator=depth_estimator,
-                frame_id=iteration,
+                frame_id=select_frame_id,
                 image_input=composite_image,
-                feature_cfg={},
-                rendered_depth=surf_depth,
+                feature_cfg=None,
+                rendered_depth=None,
                 viewpoint_cam=viewpoint_cam,
                 dataset=dataset
             )
@@ -180,19 +214,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Extract DINO features from gt image and cache it
             if not hasattr(viewpoint_cam, 'features') or viewpoint_cam.features is None:
                 gt_in = (gt_image.unsqueeze(0) if gt_image.dim()==3 else gt_image)
-                viewpoint_cam.features = predict_img_features(feature_extractor, viewpoint_cam.uid, gt_in, dataset, save_feat=False)
+                viewpoint_cam.features = predict_img_features(feature_extractor, select_frame_id, gt_in, dataset, save_feat=False)
             
             # Extract DINO features from rendered image
             composite_in = composite_image.unsqueeze(0) if composite_image.dim() == 3 else composite_image
-            rendered_features = predict_img_features(feature_extractor, viewpoint_cam.uid, composite_in, dataset, save_feat=False)
+            rendered_features = predict_img_features(feature_extractor, select_frame_id, composite_in, dataset, save_feat=False)
 
             train_frac = min(1.0, iteration / float(opt.iterations))
             ssim_frac  = train_frac
             beta_pred = scene.uncertainty_mlp(viewpoint_cam.features) if scene.uncertainty_mlp is not None else torch.ones_like(surf_depth.squeeze(0))
+            
             # Get opacity mask
-            opacity_mask = render_pkg.get("rend_alpha", torch.ones(gt_image.shape[-2:], device=gt_image.device))
+            opacity_mask = render_pkg.get("opacity", torch.ones(gt_image.shape[-2:], device=gt_image.device))
             if opacity_mask.dim() == 2:
                 opacity_mask = opacity_mask.unsqueeze(0)
+            
+            # Compute loss components
             uncer_loss_map, beta_resized, rgb_l1_map, depth_l1_map = compute_mapping_loss_components(
                 gt_img=gt_image, rendered_img=composite_image,
                 ref_depth=gt_metric_depth, rendered_depth=rendered_metric_depth,
@@ -209,17 +246,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 reg_v = compute_dino_regularization_loss(beta_pred, viewpoint_cam.features)
                 uncertainty_loss = uncertainty_loss + opt.lambda_dino_reg * reg_v
 
-            beta2 = (beta_resized.detach() ** 2).clamp_min(1e-8)          # [H,W]
-            rgb_l1_perpix   = rgb_l1_map.mean(0)                          # [H,W]  (채널 평균)
-            depth_l1_perpix = depth_l1_map.squeeze(0)                     # [H,W]
+            # rgb_l1_perpix   = rgb_l1_map.mean(0)                          # [H,W]  (채널 평균)
+            # depth_l1_perpix = depth_l1_map.squeeze(0)                     # [H,W]
 
-            render_loss_uncer = (
-                opt.lambda_rgb_l1 * (rgb_l1_perpix / beta2).mean()
-                + opt.lambda_depth_l1 * (depth_l1_perpix / beta2).mean()
-            )
+            # ---- schedule s: 0 (before warmup) -> 1 (after ramp) ----
+            s = beta_schedule_factor(iteration, opt)
 
-            loss = render_loss_uncer
-            loss_dict['Lrender_uncer'] = render_loss_uncer
+            # ---- mix constant-beta with predicted-beta for render weighting ----
+            beta_img = mix_beta_for_render(beta_resized.detach(), s, opt)  # [H,W]
+            beta2    = (beta_img ** 2).clamp_min(1e-8).clamp_max(1.0)
+
+            # render loss with scheduled beta
+            rgb_l1_perpix   = rgb_l1_map.mean(0)          # [H,W]
+            render_Lssim = ssim(composite_image, gt_image)
+            L_color = (1.0 - opt.lambda_dssim) * (rgb_l1_perpix / beta2).mean() + opt.lambda_dssim * (1.0 - render_Lssim)
+            
+            # depth_l1_perpix = depth_l1_map.squeeze(0)     # [H,W]
+            # render_loss_uncer = (
+            #     opt.lambda_rgb_l1   *  L_color +
+            #     opt.lambda_depth_l1 * (depth_l1_perpix / beta2).mean()
+            # )
+            loss = L_color
+            loss_dict['Lrender_uncer'] = L_color
+            loss_dict['beta_img'] = beta_img
 
             # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - Lssim)
             # loss_dict['l1'] = Ll1
@@ -247,10 +296,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss += shrink_loss
             loss_dict['Lshrink'] = shrink_loss
 
-            loss.backward(retain_graph=True)
-            if scene.uncertainty_mlp is not None:
-                uncertainty_loss.backward()
+            loss.backward()
+            # uncertainty MLP update only after warmup+ramp start
+            s = beta_schedule_factor(iteration, opt)
+            if s > 0.0:  # iteration >= warmup_iters
+                (uncertainty_loss.mean()).backward()
                 scene.step_uncertainty_optimizer()
+            # if scene.uncertainty_mlp is not None:
+            #     uncertainty_loss.backward()
+            #     scene.step_uncertainty_optimizer()
 
             iter_end.record()
 
@@ -339,7 +393,13 @@ def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, sce
     if is_wandb_available():
         metrics = {}
         for key, value in loss_dict.items():
-            metrics[f'train_loss_patches/{key}_loss'] = value.item()
+            if key == 'beta_img':
+                # Log beta_img as image with colormap
+                from utils.general_utils import colormap_no_bar
+                beta_img_colormap = colormap_no_bar(value.detach().cpu().numpy())
+                log_image(f'train_images/beta_img', beta_img_colormap, step=iteration)
+            else:
+                metrics[f'train_loss_patches/{key}_loss'] = value.item()
         metrics['train_loss_patches/total_loss'] = loss.item()
         metrics['iter_time'] = elapsed
         log_metrics(metrics, step=iteration)
@@ -388,7 +448,7 @@ def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, sce
                     # Compute mapping loss components in debug mode for logging
                     if scene.uncertainty_mlp is not None and hasattr(viewpoint, 'features') and viewpoint.features is not None:
                         image_in = image.unsqueeze(0) if image.dim() == 3 else image
-                        rendered_features = predict_img_features(feature_extractor, viewpoint.uid, image_in, dataset, save_feat=False)
+                        rendered_features = predict_img_features(feature_extractor, select_frame_id, image_in, dataset, save_feat=False)
                         train_frac = min(1.0, iteration / float(1000))  # Use a reasonable train fraction for validation
                         ssim_frac = train_frac
                         beta_pred = scene.uncertainty_mlp(viewpoint.features)
@@ -425,10 +485,20 @@ def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, sce
                             }
                     
                     if is_wandb_available() and (idx < 8):
-                        from utils.general_utils import colormap
+                        from utils.general_utils import colormap_no_bar, colormap
                         log_image(config['name'] + "_view_{}/sky".format(viewpoint.image_name), env_image, step=iteration)
                         log_image(config['name'] + "_view_{}/render".format(viewpoint.image_name), image, step=iteration)
                         log_image(config['name'] + "_view_{}/disparity".format(viewpoint.image_name), disparity, step=iteration)
+                        
+                        # Log surf_depth with colormap
+                        surf_depth_colormap = colormap(render_pkg["surf_depth"].cpu().numpy()[0])
+                        log_image(config['name'] + "_view_{}/surf_depth".format(viewpoint.image_name), surf_depth_colormap, step=iteration)
+                        
+                        # Log opacity_mask
+                        opacity_mask = render_pkg.get("opacity", torch.ones(gt_image.shape[-2:], device=gt_image.device))
+                        if opacity_mask.dim() == 2:
+                            opacity_mask = opacity_mask.unsqueeze(0)
+                        log_image(config['name'] + "_view_{}/opacity_mask".format(viewpoint.image_name), opacity_mask, step=iteration)
                         
                         rend_alpha = render_pkg['rend_alpha']
                         rend_normal = render_pkg["rend_normal"] * 0.5 + 0.5
@@ -438,7 +508,7 @@ def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, sce
                         log_image(config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name), rend_alpha, step=iteration)
 
                         rend_dist = render_pkg["rend_dist"]
-                        rend_dist = colormap(rend_dist.cpu().numpy()[0])
+                        rend_dist = colormap_no_bar(rend_dist.cpu().numpy()[0])
                         log_image(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist, step=iteration)
 
                         semantic_pkg = render_semantic(viewpoint, scene.gaussians, *renderArgs)
@@ -481,15 +551,23 @@ def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, sce
                                 debug_image_vars['dino_cosine_similarity'] = dino_cosine_similarity
                             
                             # Log each debug image with proper colormap
+                            # Variables that benefit from colorbar (for value range understanding)
+                            colorbar_useful_vars = ['rendered_depth_masked', 'ref_depth_masked', 'small_depth', 
+                                                   'uncertainty_loss_map', 'resized_uncertainty', 'uncertainty_feature']
+                            
                             for var_name, var_tensor in debug_image_vars.items():
                                 if var_tensor is not None and len(var_tensor.shape) >= 2:
                                     # Handle different tensor shapes and apply colormap for better visualization
                                     if var_name in ['depth_mask']:
                                         # Binary mask - no colormap needed
                                         log_image(config['name'] + "_view_{}/debug_{}".format(viewpoint.image_name, var_name), var_tensor, step=iteration)
-                                    else:
-                                        # Apply colormap for other tensors
+                                    elif var_name in colorbar_useful_vars:
+                                        # Apply colormap with colorbar for depth/uncertainty variables
                                         var_colormap = colormap(var_tensor.detach().cpu().numpy())
+                                        log_image(config['name'] + "_view_{}/debug_{}".format(viewpoint.image_name, var_name), var_colormap, step=iteration)
+                                    else:
+                                        # Apply colormap without colorbar for other tensors
+                                        var_colormap = colormap_no_bar(var_tensor.detach().cpu().numpy())
                                         log_image(config['name'] + "_view_{}/debug_{}".format(viewpoint.image_name, var_name), var_colormap, step=iteration)
 
                         if iteration == testing_iterations[0]:

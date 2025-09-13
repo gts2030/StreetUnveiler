@@ -153,6 +153,7 @@ def _predict_metric3d_depth(
     ).squeeze()
 
     canonical_to_real_scale = cfg["cam"]["fx"] / 1000.0
+    # print(f"canonical_to_real_scale: {canonical_to_real_scale}")
     pred_depth = pred_depth * canonical_to_real_scale
     return torch.clamp(pred_depth, 0, 300)
 
@@ -220,12 +221,15 @@ def _create_camera_config(feature_cfg: Dict, viewpoint_cam, dataset=None) -> Dic
         resolution_scale = 1.0 if dataset.resolution == -1 else dataset.resolution
     
     # Extract and set fx value
-    fx = _extract_camera_fx(viewpoint_cam)
-    if fx is not None:
-        if 'cam' not in current_cfg:
-            current_cfg['cam'] = {}
-        # Adjust fx for resolution scaling
-        current_cfg['cam']['fx'] = fx / resolution_scale
+    # fx = _extract_camera_fx(viewpoint_cam)
+    # if fx is not None:
+    #     if 'cam' not in current_cfg:
+    #         current_cfg['cam'] = {}
+    #     # Adjust fx for resolution scaling
+    #     current_cfg['cam']['fx'] = fx / resolution_scale
+    if 'cam' not in current_cfg:
+        current_cfg['cam'] = {}
+        current_cfg['cam']['fx'] = 1000.0
     
     return current_cfg
 
