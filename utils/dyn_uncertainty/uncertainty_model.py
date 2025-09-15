@@ -35,6 +35,9 @@ class MLPNetwork(nn.Module):
         # Initialize output layer
         self.output_layer = nn.Linear(self.output_layer_input_dim, output_dim)
         nn.init.kaiming_uniform_(self.output_layer.weight, nonlinearity='relu')
+        # Initialize bias to output reasonable initial uncertainty values (around 1.0 after softplus)
+        # softplus(0) ≈ 0.693, so we set bias to around 0.5 to get initial output around 1.0
+        nn.init.constant_(self.output_layer.bias, 0.5)
         
         # Set activation function
         self.net_activation = net_activation

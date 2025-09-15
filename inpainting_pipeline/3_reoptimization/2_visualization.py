@@ -14,6 +14,7 @@ import sys
 import torch
 import torchvision
 import os
+import shutil
 from tqdm import tqdm
 from os import makedirs
 
@@ -26,6 +27,36 @@ from scene.env_map import SkyModel
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
+
+
+def move_uncertainty_folder(model_path, current_inpaint_round):
+    """
+    Move uncertainty folder from the main output directory to the instance_workspace folder.
+    
+    Args:
+        model_path: Path to the model output directory
+        current_inpaint_round: Current inpainting round number
+    """
+    source_uncertainty_path = os.path.join(model_path, "uncertainty")
+    target_workspace_path = os.path.join(model_path, "instance_workspace_{}".format(current_inpaint_round))
+    target_uncertainty_path = os.path.join(target_workspace_path, "uncertainty")
+    
+    # Check if source uncertainty folder exists
+    if os.path.exists(source_uncertainty_path):
+        # Create target workspace directory if it doesn't exist
+        makedirs(target_workspace_path, exist_ok=True)
+        
+        # If target uncertainty folder already exists, remove it first
+        if os.path.exists(target_uncertainty_path):
+            print(f"Removing existing uncertainty folder: {target_uncertainty_path}")
+            shutil.rmtree(target_uncertainty_path)
+        
+        # Move the uncertainty folder
+        print(f"Moving uncertainty folder from {source_uncertainty_path} to {target_uncertainty_path}")
+        shutil.move(source_uncertainty_path, target_uncertainty_path)
+        print(f"✅ Successfully moved uncertainty folder to {target_uncertainty_path}")
+    else:
+        print(f"⚠️ Source uncertainty folder not found: {source_uncertainty_path}")
 
 
 def render_set(model_path, views, gaussians, sky_model, pipeline, background, current_inpaint_round):
@@ -94,5 +125,8 @@ if __name__ == "__main__":
         current_inpaint_round = args.current_inpaint_round
 
     assert current_inpaint_round is not None
+
+    # Move uncertainty folder to instance_workspace before rendering
+    move_uncertainty_folder(model.extract(args).model_path, current_inpaint_round)
 
     render_sets(model.extract(args), args.iteration, pipeline.extract(args), current_inpaint_round)

@@ -268,15 +268,22 @@ def compute_mapping_loss_components(
     # rgb_l1_loss = torch.abs(rendered_img * mask - gt_img * mask)
     rgb_l1_loss = torch.abs(rendered_img - gt_img)
 
-    # Compute depth loss with adaptive thresholding
-    median_depth = ref_depth.median()
-    depth_threshold = min(3 * median_depth, 100)
-    depth_mask = ((ref_depth > 0.01) & (ref_depth < depth_threshold)).view(
-        *rendered_depth.shape
-    )
-    depth_l1_loss = (
-        torch.abs(rendered_depth * depth_mask - ref_depth * depth_mask)
-    )
+    # Compute depth loss with adaptive thresholding (only if depth is provided)
+    if ref_depth is not None and rendered_depth is not None:
+        median_depth = ref_depth.median()
+        depth_threshold = min(3 * median_depth, 100)
+        depth_mask = ((ref_depth > 0.01) & (ref_depth < depth_threshold)).view(
+            *rendered_depth.shape
+        )
+        depth_l1_loss = (
+            torch.abs(rendered_depth * depth_mask - ref_depth * depth_mask)
+        )
+    else:
+        # Create dummy depth values when depth is not used
+        median_depth = torch.tensor(1.0, device=gt_img.device)
+        depth_threshold = torch.tensor(100.0, device=gt_img.device)
+        depth_mask = torch.ones((1, h, w), device=gt_img.device, dtype=torch.bool)
+        depth_l1_loss = torch.zeros((1, h, w), device=gt_img.device)
 
     # Process uncertainty values
     processed_uncertainty = torch.clip(uncertainty, min=0.1) + 1e-3
@@ -312,18 +319,24 @@ def compute_mapping_loss_components(
         median_filter(small_ssim_loss.unsqueeze(0).unsqueeze(0)).squeeze(0).squeeze(0)
     )
 
-    # Process depth loss for uncertainty computation
-    small_depth_loss_before_penalize = resample_tensor_to_shape(
-        torch.clip(depth_l1_loss.squeeze(), max=5.0).detach(),
-        uncertainty.shape,
-        "bicubic",
-    )
-    small_depth = resample_tensor_to_shape(
-        ref_depth.squeeze().detach(), uncertainty.shape, "bicubic"
-    )
-    # do not penalize far away pixels
-    small_depth_loss = small_depth_loss_before_penalize.clone()
-    small_depth_loss[small_depth > depth_threshold] = 0.0
+    # Process depth loss for uncertainty computation (only if depth is provided)
+    if ref_depth is not None:
+        small_depth_loss_before_penalize = resample_tensor_to_shape(
+            torch.clip(depth_l1_loss.squeeze(), max=5.0).detach(),
+            uncertainty.shape,
+            "bicubic",
+        )
+        small_depth = resample_tensor_to_shape(
+            ref_depth.squeeze().detach(), uncertainty.shape, "bicubic"
+        )
+        # do not penalize far away pixels
+        small_depth_loss = small_depth_loss_before_penalize.clone()
+        small_depth_loss[small_depth > depth_threshold] = 0.0
+    else:
+        # Create dummy depth values when depth is not used
+        small_depth_loss_before_penalize = torch.zeros_like(small_ssim_loss)
+        small_depth = torch.ones_like(small_ssim_loss)
+        small_depth_loss = torch.zeros_like(small_ssim_loss)
 
     # DINO feature cosine similarity loss computation
     small_dino_loss = torch.zeros_like(filtered_ssim_loss)
@@ -357,13 +370,15 @@ def compute_mapping_loss_components(
     lambda_depth = opt.lambda_depth     # depth term from OptimizationParams
     lambda_var_reg = opt.lambda_var_reg    # variance reg from OptimizationParams
 
-    # Compute final uncertainty loss (DINO term은 min으로 억제)
+    # Compute final uncertainty loss with conditional depth loss
     uncertainty_loss = (
         torch.min(filtered_ssim_loss, small_dino_loss) / (processed_uncertainty ** 2)
-        # small_dino_loss / (processed_uncertainty ** 2)
-        # + lambda_depth * small_depth_loss / (processed_uncertainty ** 2)
         + lambda_var_reg * torch.log(processed_uncertainty)
     )
+    
+    # Add depth loss term if enabled
+    if getattr(opt, 'use_depth_loss_in_uncertainty', False):
+        uncertainty_loss += lambda_depth * small_depth_loss / (processed_uncertainty ** 2)
 
     uncertainty_loss[
         small_opacity < opt.opacity_th_for_uncer_loss
@@ -371,8 +386,13 @@ def compute_mapping_loss_components(
 
     if return_debug_info:
         # Additional debug info for depth components
-        rendered_depth_masked = rendered_depth * depth_mask
-        ref_depth_masked = ref_depth * depth_mask
+        if ref_depth is not None and rendered_depth is not None:
+            rendered_depth_masked = rendered_depth * depth_mask
+            ref_depth_masked = ref_depth * depth_mask
+        else:
+            # Create dummy masked depth values
+            rendered_depth_masked = torch.zeros((1, h, w), device=gt_img.device)
+            ref_depth_masked = torch.zeros((1, h, w), device=gt_img.device)
         
         # Always return 17 values, ensuring dino_cosine_similarity is never None
         if dino_cosine_similarity is None:

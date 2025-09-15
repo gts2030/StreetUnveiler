@@ -113,6 +113,9 @@ class OptimizationParams(ParamGroup):
         self.lambda_depth = 0.2
         self.lambda_var_reg = 0.25
         self.opacity_th_for_uncer_loss = 0.9
+        
+        # Enable/disable depth loss in uncertainty computation
+        self.use_depth_loss_in_uncertainty = False
 
         self.uncertainty_enabled = True
         self.uncertainty_input_features = 384
