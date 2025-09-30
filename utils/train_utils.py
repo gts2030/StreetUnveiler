@@ -17,6 +17,12 @@ from utils.system_utils import mkdir_p
 from utils.general_utils import colormap
 
 
+def clamp_uncertainty(beta_pred: torch.Tensor, opt) -> torch.Tensor:
+    beta_min = getattr(opt, "uncertainty_beta_min", 0.05)
+    beta_max = getattr(opt, "uncertainty_beta_max", 1.5)
+    return torch.clamp(beta_pred, min=beta_min, max=beta_max)
+
+
 def _save_all_uncertainty_images(scene, gaussians, sky_model, pipe, background, dataset, depth_estimator, feature_extractor, opt, iteration):
     """
     Save uncertainty images for ALL training cameras at the final iteration of training.
@@ -58,9 +64,7 @@ def _save_all_uncertainty_images(scene, gaussians, sky_model, pipe, background, 
 
             # Predict uncertainty
             beta_pred = scene.uncertainty_mlp(viewpoint_cam.features)
-
-            # Apply the same clamping as in training
-            beta_pred = torch.clamp(beta_pred, min=0.05, max=1.5)
+            beta_pred = clamp_uncertainty(beta_pred, opt)
 
             # Get ground truth and rendered data for mapping loss computation
             gt_image = viewpoint_cam.original_image.cuda()

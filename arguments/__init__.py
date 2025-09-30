@@ -97,7 +97,7 @@ class OptimizationParams(ParamGroup):
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
         self.densify_until_iter = 25_000
-        self.densify_grad_threshold = 0.0002
+        self.densify_grad_threshold = 0.0005
 
         self.semantic_dist_from_iter = 27_500
         self.normal_consist_from_iter = 30_000
@@ -123,6 +123,8 @@ class OptimizationParams(ParamGroup):
         self.uncertainty_weight_decay = 1e-5
         self.uncertainty_hidden_dim = 64
         self.uncertainty_net_depth = 2
+        self.uncertainty_beta_min = 0.1
+        self.uncertainty_beta_max = 2.5
 
         self.ssim_median_filter_size = 5
         self.ssim_window_size = 7

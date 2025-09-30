@@ -25,7 +25,7 @@ from utils.wandb_utils import prepare_output_and_wandb, log_scalar, log_image, l
 from utils.mono_priors.metric_depth_estimators import compute_metric_depth, get_metric_depth_estimator
 from utils.mono_priors.img_feature_extractors import get_feature_extractor, predict_img_features
 from utils.dyn_uncertainty.mapping_utils import compute_mapping_loss_components, compute_dino_regularization_loss
-from utils.train_utils import _save_all_uncertainty_images, _init_uncertainty_mlp, _precompute_gt_depths
+from utils.train_utils import _save_all_uncertainty_images, _init_uncertainty_mlp, _precompute_gt_depths, clamp_uncertainty
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, continue_model_path, start_iteration, debug_from):
     start_time = time.time()
@@ -166,7 +166,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             # Prevent extremely small/large beta values that cause gradient explosion/instability
             if scene.uncertainty_mlp is not None:
-                beta_pred = torch.clamp(beta_pred, min=0.05, max=1.5)
+                beta_pred = clamp_uncertainty(beta_pred, opt)
             
             # Get opacity mask
             opacity_mask = render_pkg.get("opacity", torch.ones(gt_image.shape[-2:], device=gt_image.device))
@@ -385,6 +385,7 @@ def training_report(iteration, loss_dict, loss, elapsed, testing_iterations, sce
                         train_frac = min(1.0, iteration / float(1000))  # Use a reasonable train fraction for validation
                         ssim_frac = train_frac
                         beta_pred = scene.uncertainty_mlp(viewpoint.features)
+                        beta_pred = clamp_uncertainty(beta_pred, opt)
                         
                         # Get opacity mask for debug info
                         debug_opacity_mask = render_pkg.get("rend_alpha", torch.ones(gt_image.shape[-2:], device=gt_image.device))
